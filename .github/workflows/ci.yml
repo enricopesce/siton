@@ -30,8 +30,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install TA-Lib C library
-        run: sudo apt-get update && sudo apt-get install -y libta-lib-dev
+      - name: Install TA-Lib C library (build from source)
+        run: |
+          curl -fsSL https://github.com/ta-lib/ta-lib/releases/download/v0.6.4/ta-lib-0.6.4-src.tar.gz \
+            | tar -xz
+          cd ta-lib-0.6.4
+          ./configure --prefix=/usr
+          make -j$(nproc)
+          sudo make install
+          sudo ldconfig
 
       - uses: actions/setup-python@v5
         with:

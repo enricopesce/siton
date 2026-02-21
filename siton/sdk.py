@@ -31,15 +31,20 @@ import time
 import warnings
 from itertools import product
 
-import numpy as np
 import numba as nb
+import numpy as np
 import talib
 
-from siton.engine import (backtest_batch, backtest_batch_managed, backtest_batch_atr_managed,
-                          backtest_one_equity, backtest_one_managed_equity,
-                          backtest_one_atr_managed_equity,
-                          Result, rank_results, _NUM_CORES)
-
+from siton.engine import (
+    Result,
+    backtest_batch,
+    backtest_batch_atr_managed,
+    backtest_batch_managed,
+    backtest_one_atr_managed_equity,
+    backtest_one_equity,
+    backtest_one_managed_equity,
+    rank_results,
+)
 
 # ---------------------------------------------------------------------------
 # Timeframe → Sharpe annualization
@@ -1223,11 +1228,11 @@ def _candlestick_factory(name, ta_fn, penetration_values=None):
             grid = {}
 
         def signal_fn(data, penetration=None):
-            o, h, l, c = data["open"], data["high"], data["low"], data["close"]
+            o, h, low, c = data["open"], data["high"], data["low"], data["close"]
             if penetration is not None:
-                raw = ta_fn(o, h, l, c, penetration=penetration)
+                raw = ta_fn(o, h, low, c, penetration=penetration)
             else:
-                raw = ta_fn(o, h, l, c)
+                raw = ta_fn(o, h, low, c)
             sig = np.where(raw > 0, 1.0, np.where(raw < 0, -1.0, 0.0))
             return sig
 
@@ -1372,7 +1377,6 @@ def _attach_equity_curves(results, close, high, low, open_arr, strat_lookup, dat
                 capital, fraction, ann, rf_per_bar, 0.0,
                 atr_arr, sl_m, tp_m, trail_m)
         elif use_managed:
-            strat = strategies[name_to_strat_idx.get(r.strategy, 0)]
             sl_v = r.params.get("stop_loss", 0.0) / 100.0 if "stop_loss" in r.params else 0.0
             tp_v = r.params.get("take_profit", 0.0) / 100.0 if "take_profit" in r.params else 0.0
             trail_v = r.params.get("trailing_stop", 0.0) / 100.0 if "trailing_stop" in r.params else 0.0
@@ -1777,7 +1781,7 @@ def backtest(*strategies):
     parser.add_argument("--train-ratio", type=float, default=None, help="Train/test split ratio")
     args = parser.parse_args()
 
-    from siton.data import fetch_ohlcv, load_csv, generate_sample
+    from siton.data import fetch_ohlcv, generate_sample, load_csv
 
     print("=" * 70)
     print("  SITON SDK — Strategy Backtester")
@@ -1785,7 +1789,7 @@ def backtest(*strategies):
     t0 = time.perf_counter()
 
     if args.demo:
-        print(f"\n[*] Generating synthetic data (10000 hourly candles)...")
+        print("\n[*] Generating synthetic data (10000 hourly candles)...")
         df = generate_sample(n=10000)
         print(f"    Simulated BTC-like price from ${df['close'][0]:.0f} to ${df['close'][-1]:.0f}")
     elif args.csv:
@@ -1857,7 +1861,7 @@ def backtest(*strategies):
             for r in train_top
         }
         print(f"\n{'=' * 70}")
-        print(f"  OUT-OF-SAMPLE (TEST) — IS RANK ORDER (no OOS re-ranking)")
+        print("  OUT-OF-SAMPLE (TEST) — IS RANK ORDER (no OOS re-ranking)")
         print(f"{'=' * 70}")
         header_oos = f"{'#':>3} {'Strategy':<20} {'Return%':>9} {'Sharpe':>8} {'MaxDD%':>8} {'WinRate%':>9} {'Trades':>7} {'PF':>7} {'PSR':>6} {'WFE':>6}  Params"
         print(header_oos)
@@ -1877,7 +1881,7 @@ def backtest(*strategies):
 
         # Parameter stability section
         if stability:
-            print(f"\n  PARAMETER STABILITY (top-1 as IS window expands)")
+            print("\n  PARAMETER STABILITY (top-1 as IS window expands)")
             baseline_params = stability[0][1]
             agree_count = 0
             for j, (tr_end, params, sharpe) in enumerate(stability):
@@ -1946,7 +1950,7 @@ def backtest(*strategies):
         print(f"\n  Buy & Hold: {buy_hold_pct:+.2f}%")
         print(f"  Alpha (vs B&H): {alpha:+.2f}%")
         if first.long_only:
-            print(f"  Long-only mode (short signals ignored)")
+            print("  Long-only mode (short signals ignored)")
         print(f"{'=' * 70}")
 
     total_time = time.perf_counter() - t0

@@ -8,9 +8,9 @@ import warnings
 
 import numpy as np
 
+from siton.data import fetch_ohlcv, generate_sample, load_csv
 from siton.engine import rank_results
 from siton.sdk import run as sdk_run
-from siton.data import fetch_ohlcv, load_csv, generate_sample
 
 
 def _load_data(args):
@@ -18,7 +18,7 @@ def _load_data(args):
     start = getattr(args, "start", None)
     end = getattr(args, "end", None)
     if args.demo:
-        print(f"\n[*] Generating synthetic data (10000 hourly candles)...")
+        print("\n[*] Generating synthetic data (10000 hourly candles)...")
         df = generate_sample(n=10000)
         print(f"    Simulated BTC-like price from ${df['close'][0]:.0f} to ${df['close'][-1]:.0f}")
     elif args.csv:
@@ -156,7 +156,7 @@ defined in the Strategy file.
 
     t1 = time.perf_counter()
 
-    print(f"\n[*] Running backtest...")
+    print("\n[*] Running backtest...")
     results = sdk_run(strategies, data, timeframe=args.timeframe)
 
     total_elapsed = time.perf_counter() - t1
@@ -194,7 +194,7 @@ defined in the Strategy file.
             for r in train_top
         }
         print(f"\n{'=' * 70}")
-        print(f"  OUT-OF-SAMPLE (TEST) — IS RANK ORDER (no OOS re-ranking)")
+        print("  OUT-OF-SAMPLE (TEST) — IS RANK ORDER (no OOS re-ranking)")
         print(f"{'=' * 70}")
         header_oos = f"{'#':>3} {'Strategy':<20} {'Return%':>9} {'Sharpe':>8} {'MaxDD%':>8} {'WinRate%':>9} {'Trades':>7} {'PF':>7} {'PSR':>6} {'WFE':>6}  Params"
         print(header_oos)
@@ -214,7 +214,7 @@ defined in the Strategy file.
 
         # Parameter stability section
         if stability:
-            print(f"\n  PARAMETER STABILITY (top-1 as IS window expands)")
+            print("\n  PARAMETER STABILITY (top-1 as IS window expands)")
             baseline_params = stability[0][1]
             agree_count = 0
             for j, (tr_end, params, sharpe) in enumerate(stability):

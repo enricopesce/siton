@@ -16,9 +16,10 @@ Performance tuning:
 - Float accumulators: avoids int→float casts in hot loop (Welford, win/loss)
 """
 
-import numpy as np
-import numba as nb
 from dataclasses import dataclass
+
+import numba as nb
+import numpy as np
 
 # ---------------------------------------------------------------------------
 # Numba threading configuration — maximize CPU utilization
