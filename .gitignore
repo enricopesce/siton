@@ -1,7 +1,86 @@
+# Python
 __pycache__/
-*.pyc
-.env
-.venv/
-*.egg-info/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+
+# Distribution / packaging
 dist/
 build/
+*.egg-info/
+*.egg
+MANIFEST
+.eggs/
+wheels/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.lcov
+nosetests.xml
+test-results/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+.pyre/
+
+# Linting
+.ruff_cache/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Data files (keep examples/ clean)
+*.csv
+*.parquet
+*.feather
+*.h5
+*.hdf5
+
+# Logs
+*.log
+logs/
+
+# Claude Code
+.claude/settings.local.json

@@ -8,8 +8,8 @@ import warnings
 
 import numpy as np
 
-from siton.engine import backtest_batch, backtest_batch_managed, Result, rank_results
-from siton.indicators import expand_grid, clear_cache
+from siton.engine import rank_results
+from siton.sdk import run as sdk_run
 from siton.data import fetch_ohlcv, load_csv, generate_sample
 
 
@@ -50,7 +50,7 @@ def _df_to_numpy(df):
     }
 
 
-def _display_results(ranked, top, sort):
+def _display_results(ranked, top, sort, buy_hold_pct=None):
     """Print the ranked results table and best strategy summary."""
     print(f"\n{'=' * 70}")
     print(f"  TOP {top} STRATEGIES (sorted by {sort})")
@@ -74,6 +74,12 @@ def _display_results(ranked, top, sort):
     print(f"  Params: {best.params}")
     print(f"  Return: {best.total_return_pct:+.2f}% | Sharpe: {best.sharpe_ratio:.3f} | MaxDD: {best.max_drawdown_pct:.2f}%")
     print(f"  Win Rate: {best.win_rate_pct:.2f}% | Trades: {best.num_trades} | Profit Factor: {best.profit_factor:.3f}")
+
+    if buy_hold_pct is not None:
+        alpha = best.total_return_pct - buy_hold_pct
+        print(f"\n  Buy & Hold: {buy_hold_pct:+.2f}%")
+        print(f"  Alpha (vs B&H): {alpha:+.2f}%")
+
     print(f"{'=' * 70}")
 
 
@@ -90,114 +96,6 @@ def _load_sdk_file(filepath):
         print(f"Error: {filepath} does not define a STRATEGY variable.", file=sys.stderr)
         sys.exit(1)
     return mod.STRATEGY
-
-
-def _run_sdk_strategy(strategy, data, close, t1):
-    """Run an SDK Strategy through the standard pipeline."""
-    import itertools
-    from siton.sdk import Strategy as SDKStrategy
-
-    strategies = [strategy] if isinstance(strategy, SDKStrategy) else list(strategy)
-
-    combos = []
-    combo_strat = []
-    strat_lookup = {}
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        for si, strat in enumerate(strategies):
-            factory = strat.as_factory()
-            name, grid, signal_fn = factory()
-            strat_lookup[name] = signal_fn
-            for params in expand_grid(grid):
-                combos.append((name, params))
-                combo_strat.append(si)
-
-    use_managed = any(s.has_managed for s in strategies)
-
-    clear_cache()
-    n_combos = len(combos)
-    signals_2d = np.empty((n_combos, len(close)), dtype=np.float64)
-    for i, (name, params) in enumerate(combos):
-        signals_2d[i] = strat_lookup[name](data, **params)
-    clear_cache()
-
-    # Read execution params from the first Strategy object
-    first = strategies[0]
-    fee_pct = first.fee if first.fee is not None else 0.075
-    slip_pct = first.slippage
-    fee = fee_pct / 100.0
-    slippage = slip_pct / 100.0
-    capital = first.capital
-    fraction = first.fraction
-
-    if not use_managed:
-        print(f"\n[*] Testing {n_combos} strategy combinations...")
-        print(f"    Capital: ${capital:,.0f} | Fraction: {fraction*100:.0f}% | Fee: {fee_pct}% | Slippage: {slip_pct}%")
-
-        metrics_2d = backtest_batch(close, signals_2d, fee, slippage, capital, fraction)
-        results = []
-        for i, (name, params) in enumerate(combos):
-            m = metrics_2d[i]
-            results.append(Result(
-                strategy=name, params=params,
-                total_return_pct=round(m[0], 2), sharpe_ratio=round(m[1], 3),
-                max_drawdown_pct=round(m[2], 2), win_rate_pct=round(m[3], 2),
-                num_trades=int(m[4]), profit_factor=round(m[5], 3),
-            ))
-    else:
-        high = data["high"]
-        low = data["low"]
-        expanded_indices = []
-        expanded_combos = []
-
-        for base_i, (name, params) in enumerate(combos):
-            strat = strategies[combo_strat[base_i]]
-            sl_vals = [v / 100.0 for v in strat.stop_loss] if strat.stop_loss else [0.0]
-            tp_vals = [v / 100.0 for v in strat.take_profit] if strat.take_profit else [0.0]
-            trail_vals = [v / 100.0 for v in strat.trailing_stop] if strat.trailing_stop else [0.0]
-
-            for sl_v, tp_v, trail_v in itertools.product(sl_vals, tp_vals, trail_vals):
-                expanded_indices.append((base_i, sl_v, tp_v, trail_v))
-                pm_params = dict(params)
-                if strat.stop_loss:
-                    pm_params["stop_loss"] = round(sl_v * 100, 2)
-                if strat.take_profit:
-                    pm_params["take_profit"] = round(tp_v * 100, 2)
-                if strat.trailing_stop:
-                    pm_params["trailing_stop"] = round(trail_v * 100, 2)
-                expanded_combos.append((name, pm_params))
-
-        n_expanded = len(expanded_indices)
-
-        print(f"\n[*] Testing {n_expanded} backtests ({n_combos} signals x {n_expanded // n_combos} PM combos)...")
-        print(f"    Capital: ${capital:,.0f} | Fraction: {fraction*100:.0f}% | Fee: {fee_pct}% | Slippage: {slip_pct}%")
-        sig_indices = np.empty(n_expanded, dtype=np.int64)
-        sl_arr = np.empty(n_expanded, dtype=np.float64)
-        tp_arr = np.empty(n_expanded, dtype=np.float64)
-        trail_arr = np.empty(n_expanded, dtype=np.float64)
-
-        for idx, (base_i, sl_v, tp_v, trail_v) in enumerate(expanded_indices):
-            sig_indices[idx] = base_i
-            sl_arr[idx] = sl_v
-            tp_arr[idx] = tp_v
-            trail_arr[idx] = trail_v
-
-        metrics_2d = backtest_batch_managed(
-            close, high, low, signals_2d, fee, slippage,
-            capital, fraction,
-            sig_indices, sl_arr, tp_arr, trail_arr)
-
-        results = []
-        for i, (name, params) in enumerate(expanded_combos):
-            m = metrics_2d[i]
-            results.append(Result(
-                strategy=name, params=params,
-                total_return_pct=round(m[0], 2), sharpe_ratio=round(m[1], 3),
-                max_drawdown_pct=round(m[2], 2), win_rate_pct=round(m[3], 2),
-                num_trades=int(m[4]), profit_factor=round(m[5], 3),
-            ))
-
-    return results
 
 
 def main():
@@ -223,11 +121,16 @@ defined in the Strategy file.
     parser.add_argument("--end", metavar="DATE", help="End date YYYY-MM-DD (inclusive)")
     parser.add_argument("--csv", help="Load OHLCV from CSV file instead of exchange")
     parser.add_argument("--demo", action="store_true", help="Use synthetic data (no API needed)")
+    parser.add_argument("--validate", action="store_true", help="Enable walk-forward validation")
+    parser.add_argument("--train-ratio", type=float, default=None, help="Train/test split ratio (default: 0.7)")
 
     args = parser.parse_args()
 
     # --- Load strategy ---
     strategy = _load_sdk_file(args.strategy)
+
+    from siton.sdk import Strategy as SDKStrategy
+    strategies = [strategy] if isinstance(strategy, SDKStrategy) else list(strategy)
 
     # --- Load data ---
     print("=" * 70)
@@ -241,22 +144,118 @@ defined in the Strategy file.
     data = _df_to_numpy(df)
     close = data["close"]
 
-    t1 = time.perf_counter()
-    results = _run_sdk_strategy(strategy, data, close, t1)
+    # Buy & hold benchmark
+    buy_hold_pct = (close[-1] / close[0] - 1.0) * 100.0
 
-    total_combos = len(results)
-    elapsed = time.perf_counter() - t1
-    print(f"    Done in {elapsed:.4f}s ({total_combos / max(elapsed, 0.0001):.0f} backtests/sec)")
-
-    # --- Rank & display ---
-    from siton.sdk import Strategy as SDKStrategy
-    strategies = [strategy] if isinstance(strategy, SDKStrategy) else list(strategy)
+    # Apply CLI overrides to strategy
     first = strategies[0]
+    if args.validate:
+        first.validate = True
+    if args.train_ratio is not None:
+        first.train_ratio = args.train_ratio
+
+    t1 = time.perf_counter()
+
+    print(f"\n[*] Running backtest...")
+    results = sdk_run(strategies, data, timeframe=args.timeframe)
+
+    total_elapsed = time.perf_counter() - t1
     sort = first.sort
     top = first.top
 
-    ranked = rank_results(results, sort_by=sort)
-    _display_results(ranked, top, sort)
+    if isinstance(results, dict):
+        # Walk-forward validation: train + test results
+        train_top = results["train"]
+        test_top = results["test"]
+        stability = results.get("stability", [])
+        split = results.get("split", 0)
+        n_bars = len(close)
+
+        print(f"    Done in {total_elapsed:.4f}s")
+
+        # IS table
+        print(f"\n{'=' * 70}")
+        print(f"  IN-SAMPLE (TRAIN) — TOP {top} (sorted by {sort})")
+        print(f"{'=' * 70}")
+        header = f"{'#':>3} {'Strategy':<20} {'Return%':>9} {'Sharpe':>8} {'MaxDD%':>8} {'WinRate%':>9} {'Trades':>7} {'PF':>7} {'PSR':>6}  Params"
+        print(header)
+        print("-" * len(header) + "-" * 30)
+        for i, r in enumerate(train_top[:top], 1):
+            params_str = ", ".join(f"{k}={v}" for k, v in r.params.items())
+            print(
+                f"{i:>3} {r.strategy:<20} {r.total_return_pct:>+8.2f}% "
+                f"{r.sharpe_ratio:>8.3f} {r.max_drawdown_pct:>8.2f} "
+                f"{r.win_rate_pct:>8.2f}% {r.num_trades:>7} {r.profit_factor:>7.3f} {r.psr:>6.3f}  {params_str}"
+            )
+
+        # OOS table with WFE column — IS rank order preserved, no OOS re-ranking
+        is_return_lookup = {
+            (r.strategy, tuple(sorted(r.params.items()))): r.total_return_pct
+            for r in train_top
+        }
+        print(f"\n{'=' * 70}")
+        print(f"  OUT-OF-SAMPLE (TEST) — IS RANK ORDER (no OOS re-ranking)")
+        print(f"{'=' * 70}")
+        header_oos = f"{'#':>3} {'Strategy':<20} {'Return%':>9} {'Sharpe':>8} {'MaxDD%':>8} {'WinRate%':>9} {'Trades':>7} {'PF':>7} {'PSR':>6} {'WFE':>6}  Params"
+        print(header_oos)
+        print("-" * len(header_oos) + "-" * 30)
+        for i, r in enumerate(test_top[:top], 1):
+            params_str = ", ".join(f"{k}={v}" for k, v in r.params.items())
+            is_ret = is_return_lookup.get((r.strategy, tuple(sorted(r.params.items()))))
+            if is_ret is not None and is_ret > 0.0:
+                wfe_str = f"{r.total_return_pct / is_ret:>6.2f}"
+            else:
+                wfe_str = f"{'N/A':>6}"
+            print(
+                f"{i:>3} {r.strategy:<20} {r.total_return_pct:>+8.2f}% "
+                f"{r.sharpe_ratio:>8.3f} {r.max_drawdown_pct:>8.2f} "
+                f"{r.win_rate_pct:>8.2f}% {r.num_trades:>7} {r.profit_factor:>7.3f} {r.psr:>6.3f} {wfe_str}  {params_str}"
+            )
+
+        # Parameter stability section
+        if stability:
+            print(f"\n  PARAMETER STABILITY (top-1 as IS window expands)")
+            baseline_params = stability[0][1]
+            agree_count = 0
+            for j, (tr_end, params, sharpe) in enumerate(stability):
+                params_str = ", ".join(f"{k}={v}" for k, v in params.items())
+                if j == 0:
+                    marker = "<- baseline"
+                    agree_count += 1
+                elif params == baseline_params:
+                    marker = "ok"
+                    agree_count += 1
+                else:
+                    marker = "<- changed"
+                print(f"    {tr_end} bars ({tr_end * 100 / n_bars:.0f}%): {params_str} -- Sharpe {sharpe:.3f}  {marker}")
+            print(f"    Stability: {agree_count}/{len(stability)} windows agree with IS winner")
+
+        # Best strategy summary
+        if train_top:
+            best_is = train_top[0]
+            best_oos = None
+            best_key = (best_is.strategy, tuple(sorted(best_is.params.items())))
+            for r in test_top:
+                if (r.strategy, tuple(sorted(r.params.items()))) == best_key:
+                    best_oos = r
+                    break
+            print(f"\n{'=' * 70}")
+            print(f"  BEST STRATEGY: {best_is.strategy}")
+            print(f"  Params: {best_is.params}")
+            print(f"  IS  Return: {best_is.total_return_pct:>+8.2f}% | Sharpe: {best_is.sharpe_ratio:.3f} | MaxDD: {best_is.max_drawdown_pct:.2f}%")
+            if best_oos:
+                wfe_str = (f"{best_oos.total_return_pct / best_is.total_return_pct:.2f}x"
+                           if best_is.total_return_pct > 0.0 else "N/A")
+                print(f"  OOS Return: {best_oos.total_return_pct:>+8.2f}% | Sharpe: {best_oos.sharpe_ratio:.3f} | MaxDD: {best_oos.max_drawdown_pct:.2f}%  WFE: {wfe_str}")
+
+        print(f"\n  IS bars: {split} | OOS bars: {n_bars - split}")
+        print(f"  Full-period Buy & Hold: {buy_hold_pct:+.2f}%")
+    else:
+        n_results = len(results)
+        print(f"    Done in {total_elapsed:.4f}s ({n_results / max(total_elapsed, 0.0001):.0f} backtests/sec)")
+
+        ranked = rank_results(results, sort_by=sort)
+        _display_results(ranked, top, sort, buy_hold_pct=buy_hold_pct)
 
     total_time = time.perf_counter() - t0
     print(f"\nTotal time: {total_time:.2f}s")

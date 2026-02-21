@@ -4,51 +4,72 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Siton is a fast crypto strategy backtester CLI that tests thousands of trading strategy parameter combinations against OHLCV candle data and ranks them by performance metrics (Sharpe ratio, return, drawdown, etc.).
+Siton is a Python framework for backtesting trading strategies on historical cryptocurrency data. It provides a fluent, chainable SDK for composing strategies from technical indicators, with a Numba-JIT parallel backtesting engine that evaluates thousands of parameter combinations in seconds.
 
-## Commands
+## Prerequisites
+
+The TA-Lib C library must be installed before `pip install`:
+- Ubuntu/Debian: `sudo apt-get install libta-lib-dev`
+- macOS: `brew install ta-lib`
+
+## Development Setup
 
 ```bash
-# Setup
-python3 -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e .
-
-# Run with synthetic data (no API keys needed)
-siton examples/complex_strategy.py --demo
-
-# Or run without installing
-python -m siton examples/complex_strategy.py --demo
-
-# Run against live exchange data
-siton my_strategy.py -s BTC/USDT -t 1h -n 5000
-
-# Run from CSV
-siton my_strategy.py --csv data.csv
 ```
 
-Execution parameters (fee, slippage, capital, fraction, top, sort) are defined
-in the Strategy file, not on the CLI.
+## Running
 
-No test suite or linter is configured.
+```bash
+# CLI entry point (installed via pyproject.toml [project.scripts])
+siton examples/long_short_momentum.py --demo
+siton examples/long_short_momentum.py -s BTC/USDT -t 1h --start 2024-01-01
+
+# Or run strategy files directly
+python examples/long_short_momentum.py --demo
+
+# Or as module
+python -m siton examples/long_short_momentum.py --demo
+```
 
 ## Architecture
 
-The codebase is a Python package (`siton/`) with five modules and a clear data pipeline:
+The data flow is: **CLI loads strategy file → loads OHLCV data → SDK expands parameter grid → generates signal arrays → engine backtests all combos in parallel → ranks results**.
 
-1. **`siton/data.py`** — Data ingestion. Three sources: live exchange via ccxt (`fetch_ohlcv` with automatic pagination), CSV file (`load_csv`), or synthetic random-walk generator (`generate_sample`). All return a Polars DataFrame with columns: `timestamp, open, high, low, close, volume`.
+### Core Modules
 
-2. **`siton/indicators.py`** — Memoized TA-Lib wrapper and signal pattern factories. Caches indicator computations via `_cached()` so each unique `(function, tag, params)` tuple is computed once. Provides ~35 factory functions covering close-only, HL, HLC, HLCV, OHLC, and volume indicator patterns. The `_tag` parameter disambiguates calls feeding different inputs to the same TA-Lib function (e.g. `SMA(close)` vs `SMA(OBV)`).
+- **`siton/sdk.py`** — The entire SDK in one file. Contains:
+  - `Signal` class: wraps a factory callable `() -> (name, grid, signal_fn)` with chainable operators (`&`, `|`, `~`, `.filter_by()`, `.agree()`, `.confirm()`, `.where_flat()`, `Signal.majority()`)
+  - ~25 indicator constructors (e.g. `ema_cross`, `rsi`, `adx`, `sar`) that return `Signal` objects
+  - `Strategy` class: binds signals (either `signal=` or `entry=`/`exit=` pair) with position management params (stop_loss, take_profit, trailing_stop)
+  - `backtest()`: CLI-oriented runner that parses args and prints results
+  - `run()`: programmatic API that returns `Result` objects
+  - Grid merge system (`_merge_flat`) handles parameter name collisions when composing signals
 
-3. **`siton/strategies.py`** — Strategy registry. One line per strategy using the factory functions from `indicators.py`. All strategies are collected in `ALL_STRATEGIES`. Currently 120 strategies (~1,800 parameter combinations) covering MA crossovers, oscillators, momentum, MACD variants, Hilbert Transform cycles, directional movement, Stochastic, SAR, volatility breakouts, candlestick patterns, volume indicators, and price transforms.
+- **`siton/engine.py`** — Numba-JIT backtesting engine. Two paths:
+  - `backtest_batch`: simple signal-following (no stops), parallelized with `nb.prange`
+  - `backtest_batch_managed`: adds stop-loss, take-profit, trailing stop; also parallelized
+  - Both warm up JIT at import time with dummy data
+  - Returns 6 metrics per combo: total_return, sharpe, max_drawdown, win_rate, num_trades, profit_factor
 
-4. **`siton/engine.py`** — Numba JIT backtesting engine with realistic portfolio model. Tracks `cash + shares` (signed: positive=long, negative=short) with per-trade slippage, fee, and fixed-fraction position sizing. `_backtest_one` is a `@njit(cache=True)` single-pass backtest using Welford's online variance (zero array allocations). `_backtest_one_managed` adds stop-loss, take-profit, and trailing stop. `backtest_batch` / `backtest_batch_managed` are `@njit(parallel=True, cache=True)` distributing combos across CPU cores via `nb.prange`. JIT is warmed up at import time.
+- **`siton/cli.py`** — CLI entry point (`main()`). Dynamically imports strategy files via `importlib`, expects them to define a `STRATEGY` variable.
 
-5. **`siton/cli.py`** — CLI entry point (argparse). Orchestrates: load data → extract full OHLCV dict to numpy once → generate all signals → batch backtest (Numba parallel) → rank and display top N results.
+- **`siton/data.py`** — Data loading: `fetch_ohlcv` (ccxt with pagination), `load_csv`, `generate_sample` (synthetic). All return Polars DataFrames with columns: timestamp, open, high, low, close, volume.
 
-## Key Conventions
+### Key Design Patterns
 
-- **Signal contract**: Strategy signal functions receive a `data` dict with keys `open, high, low, close, volume` (each a float64 `np.ndarray`) and return a `np.ndarray` of float64 values in `{-1, 0, 1}` with the same length.
-- **Strategy registration**: Add new strategies using the factory functions in `indicators.py` and append to `ALL_STRATEGIES` in `strategies.py`.
-- **Performance stack**: TA-Lib (C) for indicators, Numba `@njit(parallel=True)` for backtest engine, Polars for data loading only. OHLCV arrays extracted to numpy once and shared across all strategy/backtest calls. Indicator results are memoized.
-- **Portfolio model**: Engine tracks `cash` + `shares` (signed) per backtest. Equity = `cash + shares * price`. Supports initial capital, fixed-fraction sizing, slippage, and fee — all configured on the `Strategy` object. Blown-account protection exits the loop if equity <= 0.
-- **Sharpe ratio assumes hourly candles** (annualized with `sqrt(8760)`).
+- **Factory pattern**: Every indicator is a closure returning `(name, grid, signal_fn)`. The `Signal` class wraps these with composition operators. `_labeled_factory` prefixes grid keys with the indicator name (e.g. `ema_fast`, `adx_period`) so composed grids remain flat and human-readable.
+- **Memoized caching**: `_cached()` memoizes TA-Lib calls during signal generation. `_sdk_caches` registry tracks per-composition caches. Both are cleared between runs via `clear_cache()` / `clear_sdk_cache()`.
+- **Signals are ternary**: All signal arrays use `{-1.0, 0.0, 1.0}` (short, flat, long).
+- **Grid expansion**: `expand_grid()` produces the cartesian product of all parameter lists. Composition merges grids flat — the total combo count is the product of all leaf indicator grid sizes.
+- **Sharpe annualization**: `_ann_factor(timeframe)` computes `sqrt(periods_per_year)` for proper Sharpe ratio scaling across timeframes (1m through 1w). Uses sample standard deviation (Welford's algorithm with N-1 denominator).
+
+## Testing
+
+No test framework is configured yet. Run example strategies with `--demo` to verify behavior.
+
+## Dependencies
+
+Python >=3.10, polars, numpy (>=2.0), ccxt, ta-lib, numba. Defined in `pyproject.toml`.
