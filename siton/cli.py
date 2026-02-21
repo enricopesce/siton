@@ -33,19 +33,22 @@ def _load_data(args):
         elif end:
             date_desc = f" until {end}"
         limit_desc = f"{args.limit} " if not start else ""
-        print(f"\n[*] Fetching {limit_desc}{args.timeframe} candles for {args.symbol} from {args.exchange}{date_desc}...")
-        df = fetch_ohlcv(args.symbol, args.timeframe, args.exchange, args.limit,
-                         start=start, end=end)
+        print(
+            f"\n[*] Fetching {limit_desc}{args.timeframe} candles for {args.symbol} from {args.exchange}{date_desc}..."
+        )
+        df = fetch_ohlcv(
+            args.symbol, args.timeframe, args.exchange, args.limit, start=start, end=end
+        )
     return df
 
 
 def _df_to_numpy(df):
     """Extract OHLCV arrays from a Polars DataFrame."""
     return {
-        "open":   df["open"].to_numpy().astype(np.float64),
-        "high":   df["high"].to_numpy().astype(np.float64),
-        "low":    df["low"].to_numpy().astype(np.float64),
-        "close":  df["close"].to_numpy().astype(np.float64),
+        "open": df["open"].to_numpy().astype(np.float64),
+        "high": df["high"].to_numpy().astype(np.float64),
+        "low": df["low"].to_numpy().astype(np.float64),
+        "close": df["close"].to_numpy().astype(np.float64),
         "volume": df["volume"].to_numpy().astype(np.float64),
     }
 
@@ -72,8 +75,12 @@ def _display_results(ranked, top, sort, buy_hold_pct=None):
     print(f"\n{'=' * 70}")
     print(f"  BEST STRATEGY: {best.strategy}")
     print(f"  Params: {best.params}")
-    print(f"  Return: {best.total_return_pct:+.2f}% | Sharpe: {best.sharpe_ratio:.3f} | MaxDD: {best.max_drawdown_pct:.2f}%")
-    print(f"  Win Rate: {best.win_rate_pct:.2f}% | Trades: {best.num_trades} | Profit Factor: {best.profit_factor:.3f}")
+    print(
+        f"  Return: {best.total_return_pct:+.2f}% | Sharpe: {best.sharpe_ratio:.3f} | MaxDD: {best.max_drawdown_pct:.2f}%"
+    )
+    print(
+        f"  Win Rate: {best.win_rate_pct:.2f}% | Trades: {best.num_trades} | Profit Factor: {best.profit_factor:.3f}"
+    )
 
     if buy_hold_pct is not None:
         alpha = best.total_return_pct - buy_hold_pct
@@ -113,16 +120,22 @@ defined in the Strategy file.
         """,
     )
     parser.add_argument("strategy", help="Strategy file to run (must define STRATEGY variable)")
-    parser.add_argument("-s", "--symbol", default="BTC/USDT", help="Trading pair (default: BTC/USDT)")
+    parser.add_argument(
+        "-s", "--symbol", default="BTC/USDT", help="Trading pair (default: BTC/USDT)"
+    )
     parser.add_argument("-t", "--timeframe", default="1h", help="Candle timeframe (default: 1h)")
     parser.add_argument("-e", "--exchange", default="binance", help="Exchange (default: binance)")
-    parser.add_argument("-n", "--limit", type=int, default=5000, help="Number of candles (default: 5000)")
+    parser.add_argument(
+        "-n", "--limit", type=int, default=5000, help="Number of candles (default: 5000)"
+    )
     parser.add_argument("--start", metavar="DATE", help="Start date YYYY-MM-DD (inclusive)")
     parser.add_argument("--end", metavar="DATE", help="End date YYYY-MM-DD (inclusive)")
     parser.add_argument("--csv", help="Load OHLCV from CSV file instead of exchange")
     parser.add_argument("--demo", action="store_true", help="Use synthetic data (no API needed)")
     parser.add_argument("--validate", action="store_true", help="Enable walk-forward validation")
-    parser.add_argument("--train-ratio", type=float, default=None, help="Train/test split ratio (default: 0.7)")
+    parser.add_argument(
+        "--train-ratio", type=float, default=None, help="Train/test split ratio (default: 0.7)"
+    )
 
     args = parser.parse_args()
 
@@ -130,6 +143,7 @@ defined in the Strategy file.
     strategy = _load_sdk_file(args.strategy)
 
     from siton.sdk import Strategy as SDKStrategy
+
     strategies = [strategy] if isinstance(strategy, SDKStrategy) else list(strategy)
 
     # --- Load data ---
@@ -190,8 +204,7 @@ defined in the Strategy file.
 
         # OOS table with WFE column — IS rank order preserved, no OOS re-ranking
         is_return_lookup = {
-            (r.strategy, tuple(sorted(r.params.items()))): r.total_return_pct
-            for r in train_top
+            (r.strategy, tuple(sorted(r.params.items()))): r.total_return_pct for r in train_top
         }
         print(f"\n{'=' * 70}")
         print("  OUT-OF-SAMPLE (TEST) — IS RANK ORDER (no OOS re-ranking)")
@@ -227,7 +240,9 @@ defined in the Strategy file.
                     agree_count += 1
                 else:
                     marker = "<- changed"
-                print(f"    {tr_end} bars ({tr_end * 100 / n_bars:.0f}%): {params_str} -- Sharpe {sharpe:.3f}  {marker}")
+                print(
+                    f"    {tr_end} bars ({tr_end * 100 / n_bars:.0f}%): {params_str} -- Sharpe {sharpe:.3f}  {marker}"
+                )
             print(f"    Stability: {agree_count}/{len(stability)} windows agree with IS winner")
 
         # Best strategy summary
@@ -242,17 +257,26 @@ defined in the Strategy file.
             print(f"\n{'=' * 70}")
             print(f"  BEST STRATEGY: {best_is.strategy}")
             print(f"  Params: {best_is.params}")
-            print(f"  IS  Return: {best_is.total_return_pct:>+8.2f}% | Sharpe: {best_is.sharpe_ratio:.3f} | MaxDD: {best_is.max_drawdown_pct:.2f}%")
+            print(
+                f"  IS  Return: {best_is.total_return_pct:>+8.2f}% | Sharpe: {best_is.sharpe_ratio:.3f} | MaxDD: {best_is.max_drawdown_pct:.2f}%"
+            )
             if best_oos:
-                wfe_str = (f"{best_oos.total_return_pct / best_is.total_return_pct:.2f}x"
-                           if best_is.total_return_pct > 0.0 else "N/A")
-                print(f"  OOS Return: {best_oos.total_return_pct:>+8.2f}% | Sharpe: {best_oos.sharpe_ratio:.3f} | MaxDD: {best_oos.max_drawdown_pct:.2f}%  WFE: {wfe_str}")
+                wfe_str = (
+                    f"{best_oos.total_return_pct / best_is.total_return_pct:.2f}x"
+                    if best_is.total_return_pct > 0.0
+                    else "N/A"
+                )
+                print(
+                    f"  OOS Return: {best_oos.total_return_pct:>+8.2f}% | Sharpe: {best_oos.sharpe_ratio:.3f} | MaxDD: {best_oos.max_drawdown_pct:.2f}%  WFE: {wfe_str}"
+                )
 
         print(f"\n  IS bars: {split} | OOS bars: {n_bars - split}")
         print(f"  Full-period Buy & Hold: {buy_hold_pct:+.2f}%")
     else:
         n_results = len(results)
-        print(f"    Done in {total_elapsed:.4f}s ({n_results / max(total_elapsed, 0.0001):.0f} backtests/sec)")
+        print(
+            f"    Done in {total_elapsed:.4f}s ({n_results / max(total_elapsed, 0.0001):.0f} backtests/sec)"
+        )
 
         ranked = rank_results(results, sort_by=sort)
         _display_results(ranked, top, sort, buy_hold_pct=buy_hold_pct)

@@ -44,8 +44,21 @@ class Result:
     psr: float = 0.0
 
 
-@nb.njit(cache=True, error_model='numpy')
-def _backtest_one(close, high, low, open_arr, sig, fee, slippage, n, initial_capital, fraction, ann_factor, rf_per_bar):
+@nb.njit(cache=True, error_model="numpy")
+def _backtest_one(
+    close,
+    high,
+    low,
+    open_arr,
+    sig,
+    fee,
+    slippage,
+    n,
+    initial_capital,
+    fraction,
+    ann_factor,
+    rf_per_bar,
+):
     """Single backtest with realistic portfolio tracking and trade-level metrics."""
     cash = initial_capital
     shares = 0.0
@@ -220,11 +233,32 @@ def _backtest_one(close, high, low, open_arr, sig, fee, slippage, n, initial_cap
         cagr = 0.0
     calmar = (cagr * 100.0 / (-max_dd * 100.0)) if max_dd < -1e-10 else 0.0
 
-    return total_return, sharpe, max_dd * 100.0, win_rate, num_trades, profit_factor, sortino, calmar
+    return (
+        total_return,
+        sharpe,
+        max_dd * 100.0,
+        win_rate,
+        num_trades,
+        profit_factor,
+        sortino,
+        calmar,
+    )
 
 
-@nb.njit(parallel=True, cache=True, error_model='numpy')
-def backtest_batch(close, high, low, open_arr, signals_2d, fee, slippage, initial_capital, fraction, ann_factor, rf_per_bar):
+@nb.njit(parallel=True, cache=True, error_model="numpy")
+def backtest_batch(
+    close,
+    high,
+    low,
+    open_arr,
+    signals_2d,
+    fee,
+    slippage,
+    initial_capital,
+    fraction,
+    ann_factor,
+    rf_per_bar,
+):
     """Run ALL backtests in parallel across CPU cores.
 
     Args:
@@ -249,8 +283,19 @@ def backtest_batch(close, high, low, open_arr, signals_2d, fee, slippage, initia
 
     for c in nb.prange(n_combos):
         r0, r1, r2, r3, r4, r5, r6, r7 = _backtest_one(
-            close, high, low, open_arr, signals_2d[c], fee, slippage, n,
-            initial_capital, fraction, ann_factor, rf_per_bar)
+            close,
+            high,
+            low,
+            open_arr,
+            signals_2d[c],
+            fee,
+            slippage,
+            n,
+            initial_capital,
+            fraction,
+            ann_factor,
+            rf_per_bar,
+        )
         out[c, 0] = r0
         out[c, 1] = r1
         out[c, 2] = r2
@@ -263,13 +308,28 @@ def backtest_batch(close, high, low, open_arr, signals_2d, fee, slippage, initia
     return out
 
 
-@nb.njit(cache=True, error_model='numpy')
-def _backtest_one_managed(close, high, low, open_arr, sig, fee, slippage, n,
-                          initial_capital, fraction, ann_factor, rf_per_bar,
-                          borrow_rate_per_bar, sl_pct, tp_pct, trail_pct):
+@nb.njit(cache=True, error_model="numpy")
+def _backtest_one_managed(
+    close,
+    high,
+    low,
+    open_arr,
+    sig,
+    fee,
+    slippage,
+    n,
+    initial_capital,
+    fraction,
+    ann_factor,
+    rf_per_bar,
+    borrow_rate_per_bar,
+    sl_pct,
+    tp_pct,
+    trail_pct,
+):
     """Single backtest with portfolio tracking + position management + trade-level metrics."""
     cash = initial_capital
-    shares = 0.0       # signed: +N long, -N short
+    shares = 0.0  # signed: +N long, -N short
     prev_sig = 0.0
 
     running_max = initial_capital
@@ -295,7 +355,7 @@ def _backtest_one_managed(close, high, low, open_arr, sig, fee, slippage, n,
 
     # Position management state
     entry_price = 0.0
-    peak_price = 0.0    # best price since entry (for trailing stop)
+    peak_price = 0.0  # best price since entry (for trailing stop)
     sl_level = 0.0
     tp_level = 0.0
 
@@ -544,13 +604,37 @@ def _backtest_one_managed(close, high, low, open_arr, sig, fee, slippage, n,
         cagr = 0.0
     calmar = (cagr * 100.0 / (-max_dd * 100.0)) if max_dd < -1e-10 else 0.0
 
-    return total_return, sharpe, max_dd * 100.0, win_rate, num_trades, profit_factor, sortino, calmar
+    return (
+        total_return,
+        sharpe,
+        max_dd * 100.0,
+        win_rate,
+        num_trades,
+        profit_factor,
+        sortino,
+        calmar,
+    )
 
 
-@nb.njit(parallel=True, cache=True, error_model='numpy')
-def backtest_batch_managed(close, high, low, open_arr, signals_2d, fee, slippage,
-                           initial_capital, fraction, ann_factor, rf_per_bar,
-                           borrow_rate_per_bar, sig_indices, sl_arr, tp_arr, trail_arr):
+@nb.njit(parallel=True, cache=True, error_model="numpy")
+def backtest_batch_managed(
+    close,
+    high,
+    low,
+    open_arr,
+    signals_2d,
+    fee,
+    slippage,
+    initial_capital,
+    fraction,
+    ann_factor,
+    rf_per_bar,
+    borrow_rate_per_bar,
+    sig_indices,
+    sl_arr,
+    tp_arr,
+    trail_arr,
+):
     """Run ALL managed backtests in parallel across CPU cores.
 
     Args:
@@ -581,9 +665,23 @@ def backtest_batch_managed(close, high, low, open_arr, signals_2d, fee, slippage
     for c in nb.prange(n_combos):
         si = sig_indices[c]
         r0, r1, r2, r3, r4, r5, r6, r7 = _backtest_one_managed(
-            close, high, low, open_arr, signals_2d[si], fee, slippage, n,
-            initial_capital, fraction, ann_factor, rf_per_bar,
-            borrow_rate_per_bar, sl_arr[c], tp_arr[c], trail_arr[c])
+            close,
+            high,
+            low,
+            open_arr,
+            signals_2d[si],
+            fee,
+            slippage,
+            n,
+            initial_capital,
+            fraction,
+            ann_factor,
+            rf_per_bar,
+            borrow_rate_per_bar,
+            sl_arr[c],
+            tp_arr[c],
+            trail_arr[c],
+        )
         out[c, 0] = r0
         out[c, 1] = r1
         out[c, 2] = r2
@@ -600,10 +698,27 @@ def backtest_batch_managed(close, high, low, open_arr, signals_2d, fee, slippage
 # ATR-managed engine — stop levels scale with ATR at entry bar
 # ---------------------------------------------------------------------------
 
-@nb.njit(cache=True, error_model='numpy')
-def _backtest_one_atr_managed(close, high, low, open_arr, sig, fee, slippage, n,
-                               initial_capital, fraction, ann_factor, rf_per_bar,
-                               borrow_rate_per_bar, atr_arr, sl_mult, tp_mult, trail_mult):
+
+@nb.njit(cache=True, error_model="numpy")
+def _backtest_one_atr_managed(
+    close,
+    high,
+    low,
+    open_arr,
+    sig,
+    fee,
+    slippage,
+    n,
+    initial_capital,
+    fraction,
+    ann_factor,
+    rf_per_bar,
+    borrow_rate_per_bar,
+    atr_arr,
+    sl_mult,
+    tp_mult,
+    trail_mult,
+):
     """Single backtest with ATR-scaled stops.
 
     stop_loss   = entry_price ± sl_mult   × ATR[entry_bar]   (0 disables)
@@ -698,11 +813,19 @@ def _backtest_one_atr_managed(close, high, low, open_arr, sig, fee, slippage, n,
                 atr_i = atr_arr[i]
                 has_atr = (not np.isnan(atr_i)) and atr_i > 0.0
                 if cur_sig > 0.0:
-                    sl_level = (entry_price - sl_mult * atr_i) if (sl_mult > 0.0 and has_atr) else 0.0
-                    tp_level = (entry_price + tp_mult * atr_i) if (tp_mult > 0.0 and has_atr) else 0.0
+                    sl_level = (
+                        (entry_price - sl_mult * atr_i) if (sl_mult > 0.0 and has_atr) else 0.0
+                    )
+                    tp_level = (
+                        (entry_price + tp_mult * atr_i) if (tp_mult > 0.0 and has_atr) else 0.0
+                    )
                 else:
-                    sl_level = (entry_price + sl_mult * atr_i) if (sl_mult > 0.0 and has_atr) else 0.0
-                    tp_level = (entry_price - tp_mult * atr_i) if (tp_mult > 0.0 and has_atr) else 0.0
+                    sl_level = (
+                        (entry_price + sl_mult * atr_i) if (sl_mult > 0.0 and has_atr) else 0.0
+                    )
+                    tp_level = (
+                        (entry_price - tp_mult * atr_i) if (tp_mult > 0.0 and has_atr) else 0.0
+                    )
                 num_trades += 1.0
 
         if shares != 0.0:
@@ -792,11 +915,19 @@ def _backtest_one_atr_managed(close, high, low, open_arr, sig, fee, slippage, n,
                 atr_i = atr_arr[i]
                 has_atr = (not np.isnan(atr_i)) and atr_i > 0.0
                 if cur_sig > 0.0:
-                    sl_level = (entry_price - sl_mult * atr_i) if (sl_mult > 0.0 and has_atr) else 0.0
-                    tp_level = (entry_price + tp_mult * atr_i) if (tp_mult > 0.0 and has_atr) else 0.0
+                    sl_level = (
+                        (entry_price - sl_mult * atr_i) if (sl_mult > 0.0 and has_atr) else 0.0
+                    )
+                    tp_level = (
+                        (entry_price + tp_mult * atr_i) if (tp_mult > 0.0 and has_atr) else 0.0
+                    )
                 else:
-                    sl_level = (entry_price + sl_mult * atr_i) if (sl_mult > 0.0 and has_atr) else 0.0
-                    tp_level = (entry_price - tp_mult * atr_i) if (tp_mult > 0.0 and has_atr) else 0.0
+                    sl_level = (
+                        (entry_price + sl_mult * atr_i) if (sl_mult > 0.0 and has_atr) else 0.0
+                    )
+                    tp_level = (
+                        (entry_price - tp_mult * atr_i) if (tp_mult > 0.0 and has_atr) else 0.0
+                    )
                 num_trades += 1.0
 
         prev_sig = cur_sig
@@ -860,13 +991,38 @@ def _backtest_one_atr_managed(close, high, low, open_arr, sig, fee, slippage, n,
         cagr = 0.0
     calmar = (cagr * 100.0 / (-max_dd * 100.0)) if max_dd < -1e-10 else 0.0
 
-    return total_return, sharpe, max_dd * 100.0, win_rate, num_trades, profit_factor, sortino, calmar
+    return (
+        total_return,
+        sharpe,
+        max_dd * 100.0,
+        win_rate,
+        num_trades,
+        profit_factor,
+        sortino,
+        calmar,
+    )
 
 
-@nb.njit(parallel=True, cache=True, error_model='numpy')
-def backtest_batch_atr_managed(close, high, low, open_arr, signals_2d, atr_arr,
-                                fee, slippage, initial_capital, fraction, ann_factor, rf_per_bar,
-                                borrow_rate_per_bar, sig_indices, sl_mult_arr, tp_mult_arr, trail_mult_arr):
+@nb.njit(parallel=True, cache=True, error_model="numpy")
+def backtest_batch_atr_managed(
+    close,
+    high,
+    low,
+    open_arr,
+    signals_2d,
+    atr_arr,
+    fee,
+    slippage,
+    initial_capital,
+    fraction,
+    ann_factor,
+    rf_per_bar,
+    borrow_rate_per_bar,
+    sig_indices,
+    sl_mult_arr,
+    tp_mult_arr,
+    trail_mult_arr,
+):
     """Run ALL ATR-managed backtests in parallel across CPU cores.
 
     Args:
@@ -886,9 +1042,24 @@ def backtest_batch_atr_managed(close, high, low, open_arr, signals_2d, atr_arr,
     for c in nb.prange(n_combos):
         si = sig_indices[c]
         r0, r1, r2, r3, r4, r5, r6, r7 = _backtest_one_atr_managed(
-            close, high, low, open_arr, signals_2d[si], fee, slippage, n,
-            initial_capital, fraction, ann_factor, rf_per_bar,
-            borrow_rate_per_bar, atr_arr, sl_mult_arr[c], tp_mult_arr[c], trail_mult_arr[c])
+            close,
+            high,
+            low,
+            open_arr,
+            signals_2d[si],
+            fee,
+            slippage,
+            n,
+            initial_capital,
+            fraction,
+            ann_factor,
+            rf_per_bar,
+            borrow_rate_per_bar,
+            atr_arr,
+            sl_mult_arr[c],
+            tp_mult_arr[c],
+            trail_mult_arr[c],
+        )
         out[c, 0] = r0
         out[c, 1] = r1
         out[c, 2] = r2
@@ -905,8 +1076,21 @@ def backtest_batch_atr_managed(close, high, low, open_arr, signals_2d, atr_arr,
 # Equity curve variants — NOT parallelized, only for top N results
 # ---------------------------------------------------------------------------
 
-@nb.njit(cache=True, error_model='numpy')
-def backtest_one_equity(close, high, low, open_arr, sig, fee, slippage, initial_capital, fraction, ann_factor, rf_per_bar):
+
+@nb.njit(cache=True, error_model="numpy")
+def backtest_one_equity(
+    close,
+    high,
+    low,
+    open_arr,
+    sig,
+    fee,
+    slippage,
+    initial_capital,
+    fraction,
+    ann_factor,
+    rf_per_bar,
+):
     """Same as _backtest_one but also returns an equity curve array."""
     n = len(close)
     curve = np.empty(n, dtype=np.float64)
@@ -966,10 +1150,24 @@ def backtest_one_equity(close, high, low, open_arr, sig, fee, slippage, initial_
     return curve
 
 
-@nb.njit(cache=True, error_model='numpy')
-def backtest_one_managed_equity(close, high, low, open_arr, sig, fee, slippage,
-                                initial_capital, fraction, ann_factor, rf_per_bar,
-                                borrow_rate_per_bar, sl_pct, tp_pct, trail_pct):
+@nb.njit(cache=True, error_model="numpy")
+def backtest_one_managed_equity(
+    close,
+    high,
+    low,
+    open_arr,
+    sig,
+    fee,
+    slippage,
+    initial_capital,
+    fraction,
+    ann_factor,
+    rf_per_bar,
+    borrow_rate_per_bar,
+    sl_pct,
+    tp_pct,
+    trail_pct,
+):
     """Same as _backtest_one_managed but also returns an equity curve array."""
     n = len(close)
     curve = np.empty(n, dtype=np.float64)
@@ -1122,10 +1320,25 @@ def backtest_one_managed_equity(close, high, low, open_arr, sig, fee, slippage,
     return curve
 
 
-@nb.njit(cache=True, error_model='numpy')
-def backtest_one_atr_managed_equity(close, high, low, open_arr, sig, fee, slippage,
-                                     initial_capital, fraction, ann_factor, rf_per_bar,
-                                     borrow_rate_per_bar, atr_arr, sl_mult, tp_mult, trail_mult):
+@nb.njit(cache=True, error_model="numpy")
+def backtest_one_atr_managed_equity(
+    close,
+    high,
+    low,
+    open_arr,
+    sig,
+    fee,
+    slippage,
+    initial_capital,
+    fraction,
+    ann_factor,
+    rf_per_bar,
+    borrow_rate_per_bar,
+    atr_arr,
+    sl_mult,
+    tp_mult,
+    trail_mult,
+):
     """Same as _backtest_one_atr_managed but returns an equity curve array."""
     n = len(close)
     curve = np.empty(n, dtype=np.float64)
@@ -1185,11 +1398,19 @@ def backtest_one_atr_managed_equity(close, high, low, open_arr, sig, fee, slippa
                 atr_i = atr_arr[i]
                 has_atr = (not np.isnan(atr_i)) and atr_i > 0.0
                 if cur_sig > 0.0:
-                    sl_level = (entry_price - sl_mult * atr_i) if (sl_mult > 0.0 and has_atr) else 0.0
-                    tp_level = (entry_price + tp_mult * atr_i) if (tp_mult > 0.0 and has_atr) else 0.0
+                    sl_level = (
+                        (entry_price - sl_mult * atr_i) if (sl_mult > 0.0 and has_atr) else 0.0
+                    )
+                    tp_level = (
+                        (entry_price + tp_mult * atr_i) if (tp_mult > 0.0 and has_atr) else 0.0
+                    )
                 else:
-                    sl_level = (entry_price + sl_mult * atr_i) if (sl_mult > 0.0 and has_atr) else 0.0
-                    tp_level = (entry_price - tp_mult * atr_i) if (tp_mult > 0.0 and has_atr) else 0.0
+                    sl_level = (
+                        (entry_price + sl_mult * atr_i) if (sl_mult > 0.0 and has_atr) else 0.0
+                    )
+                    tp_level = (
+                        (entry_price - tp_mult * atr_i) if (tp_mult > 0.0 and has_atr) else 0.0
+                    )
 
         if shares != 0.0:
             exit_price = 0.0
@@ -1263,11 +1484,19 @@ def backtest_one_atr_managed_equity(close, high, low, open_arr, sig, fee, slippa
                 atr_i = atr_arr[i]
                 has_atr = (not np.isnan(atr_i)) and atr_i > 0.0
                 if cur_sig > 0.0:
-                    sl_level = (entry_price - sl_mult * atr_i) if (sl_mult > 0.0 and has_atr) else 0.0
-                    tp_level = (entry_price + tp_mult * atr_i) if (tp_mult > 0.0 and has_atr) else 0.0
+                    sl_level = (
+                        (entry_price - sl_mult * atr_i) if (sl_mult > 0.0 and has_atr) else 0.0
+                    )
+                    tp_level = (
+                        (entry_price + tp_mult * atr_i) if (tp_mult > 0.0 and has_atr) else 0.0
+                    )
                 else:
-                    sl_level = (entry_price + sl_mult * atr_i) if (sl_mult > 0.0 and has_atr) else 0.0
-                    tp_level = (entry_price - tp_mult * atr_i) if (tp_mult > 0.0 and has_atr) else 0.0
+                    sl_level = (
+                        (entry_price + sl_mult * atr_i) if (sl_mult > 0.0 and has_atr) else 0.0
+                    )
+                    tp_level = (
+                        (entry_price - tp_mult * atr_i) if (tp_mult > 0.0 and has_atr) else 0.0
+                    )
 
         prev_sig = cur_sig
         equity = cash + shares * close[i]
@@ -1286,39 +1515,118 @@ _dummy_low = np.array([0.99, 1.00, 1.01], dtype=np.float64)
 _dummy_open = np.array([1.00, 1.005, 1.015], dtype=np.float64)
 _dummy_sigs = np.zeros((1, 3), dtype=np.float64)
 _dummy_ann = np.float64(8760.0) ** 0.5
-backtest_batch(_dummy_close, _dummy_high, _dummy_low, _dummy_open, _dummy_sigs, 0.001, 0.0005, 10000.0, 1.0, _dummy_ann, 0.0)
+backtest_batch(
+    _dummy_close,
+    _dummy_high,
+    _dummy_low,
+    _dummy_open,
+    _dummy_sigs,
+    0.001,
+    0.0005,
+    10000.0,
+    1.0,
+    _dummy_ann,
+    0.0,
+)
 backtest_batch_managed(
-    _dummy_close, _dummy_high, _dummy_low, _dummy_open, _dummy_sigs, 0.001, 0.0005,
-    10000.0, 1.0, _dummy_ann, 0.0, 0.0,
+    _dummy_close,
+    _dummy_high,
+    _dummy_low,
+    _dummy_open,
+    _dummy_sigs,
+    0.001,
+    0.0005,
+    10000.0,
+    1.0,
+    _dummy_ann,
+    0.0,
+    0.0,
     np.zeros(1, dtype=np.int64),
     np.zeros(1, dtype=np.float64),
     np.zeros(1, dtype=np.float64),
     np.zeros(1, dtype=np.float64),
 )
 _dummy_sig1d = np.zeros(3, dtype=np.float64)
-backtest_one_equity(_dummy_close, _dummy_high, _dummy_low, _dummy_open, _dummy_sig1d, 0.001, 0.0005, 10000.0, 1.0, _dummy_ann, 0.0)
+backtest_one_equity(
+    _dummy_close,
+    _dummy_high,
+    _dummy_low,
+    _dummy_open,
+    _dummy_sig1d,
+    0.001,
+    0.0005,
+    10000.0,
+    1.0,
+    _dummy_ann,
+    0.0,
+)
 backtest_one_managed_equity(
-    _dummy_close, _dummy_high, _dummy_low, _dummy_open, _dummy_sig1d, 0.001, 0.0005,
-    10000.0, 1.0, _dummy_ann, 0.0, 0.0, 0.0, 0.0, 0.0,
+    _dummy_close,
+    _dummy_high,
+    _dummy_low,
+    _dummy_open,
+    _dummy_sig1d,
+    0.001,
+    0.0005,
+    10000.0,
+    1.0,
+    _dummy_ann,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
 )
 _dummy_atr3 = np.array([0.001, 0.001, 0.001], dtype=np.float64)
 backtest_batch_atr_managed(
-    _dummy_close, _dummy_high, _dummy_low, _dummy_open, _dummy_sigs, _dummy_atr3,
-    0.001, 0.0005, 10000.0, 1.0, _dummy_ann, 0.0, 0.0,
+    _dummy_close,
+    _dummy_high,
+    _dummy_low,
+    _dummy_open,
+    _dummy_sigs,
+    _dummy_atr3,
+    0.001,
+    0.0005,
+    10000.0,
+    1.0,
+    _dummy_ann,
+    0.0,
+    0.0,
     np.zeros(1, dtype=np.int64),
     np.zeros(1, dtype=np.float64),
     np.zeros(1, dtype=np.float64),
     np.zeros(1, dtype=np.float64),
 )
 backtest_one_atr_managed_equity(
-    _dummy_close, _dummy_high, _dummy_low, _dummy_open, _dummy_sig1d,
-    0.001, 0.0005, 10000.0, 1.0, _dummy_ann, 0.0, 0.0,
-    _dummy_atr3, 1.5, 3.0, 0.0)
-del _dummy_close, _dummy_high, _dummy_low, _dummy_open, _dummy_sigs, _dummy_sig1d, _dummy_ann, _dummy_atr3
+    _dummy_close,
+    _dummy_high,
+    _dummy_low,
+    _dummy_open,
+    _dummy_sig1d,
+    0.001,
+    0.0005,
+    10000.0,
+    1.0,
+    _dummy_ann,
+    0.0,
+    0.0,
+    _dummy_atr3,
+    1.5,
+    3.0,
+    0.0,
+)
+del (
+    _dummy_close,
+    _dummy_high,
+    _dummy_low,
+    _dummy_open,
+    _dummy_sigs,
+    _dummy_sig1d,
+    _dummy_ann,
+    _dummy_atr3,
+)
 
 
 def rank_results(results: list[Result], sort_by: str = "sharpe_ratio") -> list[Result]:
     """Sort results by chosen metric, descending. Zero-trade results rank last."""
-    return sorted(results,
-                  key=lambda r: (r.num_trades > 0, getattr(r, sort_by)),
-                  reverse=True)
+    return sorted(results, key=lambda r: (r.num_trades > 0, getattr(r, sort_by)), reverse=True)

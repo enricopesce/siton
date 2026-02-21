@@ -10,6 +10,7 @@ import polars as pl
 def _parse_date_ms(date_str: str) -> int:
     """Parse a date string (YYYY-MM-DD) to epoch milliseconds."""
     from datetime import datetime, timezone
+
     dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     return int(dt.timestamp() * 1000)
 
@@ -17,6 +18,7 @@ def _parse_date_ms(date_str: str) -> int:
 def _check_gaps(df: pl.DataFrame, timeframe: str, max_gap_factor: float = 2.5) -> None:
     """BUG-05: Warn on temporal gaps and invalid OHLCV values."""
     from siton.sdk import _TIMEFRAME_SECONDS
+
     tf_ms = _TIMEFRAME_SECONDS.get(timeframe, 3600) * 1000
     ts = df["timestamp"].to_numpy()
     if len(ts) < 2:
@@ -107,20 +109,25 @@ def fetch_ohlcv(
     if use_limit:
         all_ohlcv = all_ohlcv[:limit]
 
-    df = pl.DataFrame(
-        all_ohlcv,
-        schema=["timestamp", "open", "high", "low", "close", "volume"],
-        orient="row",
-    ).with_columns(
-        (pl.col("timestamp").cast(pl.Int64) * 1000).cast(pl.Datetime("us")).alias("datetime"),
-    ).sort("timestamp")
+    df = (
+        pl.DataFrame(
+            all_ohlcv,
+            schema=["timestamp", "open", "high", "low", "close", "volume"],
+            orient="row",
+        )
+        .with_columns(
+            (pl.col("timestamp").cast(pl.Int64) * 1000).cast(pl.Datetime("us")).alias("datetime"),
+        )
+        .sort("timestamp")
+    )
 
     _check_gaps(df, timeframe)
     return df
 
 
-def load_csv(path: str, start: str | None = None, end: str | None = None,
-             timeframe: str = "1h") -> pl.DataFrame:
+def load_csv(
+    path: str, start: str | None = None, end: str | None = None, timeframe: str = "1h"
+) -> pl.DataFrame:
     """Load OHLCV from CSV. Expects columns: timestamp,open,high,low,close,volume."""
     df = pl.read_csv(path).sort("timestamp")
     if start:
@@ -134,21 +141,23 @@ def load_csv(path: str, start: str | None = None, end: str | None = None,
 def generate_sample(n: int = 10000, seed: int = 42) -> pl.DataFrame:
     """Generate synthetic OHLCV with GARCH volatility and fat-tailed returns."""
     if n == 0:
-        return pl.DataFrame({
-            "timestamp": pl.Series([], dtype=pl.Int64),
-            "open": pl.Series([], dtype=pl.Float64),
-            "high": pl.Series([], dtype=pl.Float64),
-            "low": pl.Series([], dtype=pl.Float64),
-            "close": pl.Series([], dtype=pl.Float64),
-            "volume": pl.Series([], dtype=pl.Float64),
-        })
+        return pl.DataFrame(
+            {
+                "timestamp": pl.Series([], dtype=pl.Int64),
+                "open": pl.Series([], dtype=pl.Float64),
+                "high": pl.Series([], dtype=pl.Float64),
+                "low": pl.Series([], dtype=pl.Float64),
+                "close": pl.Series([], dtype=pl.Float64),
+                "volume": pl.Series([], dtype=pl.Float64),
+            }
+        )
 
     rng = np.random.default_rng(seed)
 
     # GARCH(1,1)-like variance process for realistic volatility clustering
     omega, alpha_g, beta_g = 4e-6, 0.10, 0.85
     h = np.empty(n)
-    h[0] = 0.02 ** 2  # initial variance (~2% per bar)
+    h[0] = 0.02**2  # initial variance (~2% per bar)
     eps = rng.standard_t(df=5, size=n)  # fat-tailed Student-t innovations
     log_returns = np.empty(n)
     log_returns[0] = math.sqrt(h[0]) * eps[0]
@@ -167,17 +176,22 @@ def generate_sample(n: int = 10000, seed: int = 42) -> pl.DataFrame:
     open_[1:] = close[:-1] * (1 + gap)
 
     high = np.maximum(open_, close) * (1 + rng.uniform(0, 0.008, n))
-    low  = np.minimum(open_, close) * (1 - rng.uniform(0, 0.008, n))
+    low = np.minimum(open_, close) * (1 - rng.uniform(0, 0.008, n))
 
     # Volume: correlated with absolute returns (higher vol → higher volume)
-    base_vol = rng.lognormal(6.0, 1.0, n)          # heavy-tailed base
-    vol_factor = 1 + 5 * np.abs(returns) / 0.02    # spike on large moves
+    base_vol = rng.lognormal(6.0, 1.0, n)  # heavy-tailed base
+    vol_factor = 1 + 5 * np.abs(returns) / 0.02  # spike on large moves
     volume = base_vol * vol_factor
 
     timestamps = np.arange(n, dtype=np.int64) * 3_600_000
 
-    return pl.DataFrame({
-        "timestamp": timestamps,
-        "open": open_, "high": high, "low": low,
-        "close": close, "volume": volume,
-    })
+    return pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "open": open_,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": volume,
+        }
+    )

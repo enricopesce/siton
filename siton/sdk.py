@@ -51,9 +51,20 @@ from siton.engine import (
 # ---------------------------------------------------------------------------
 
 _TIMEFRAME_SECONDS = {
-    "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
-    "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "8h": 28800, "12h": 43200,
-    "1d": 86400, "3d": 259200, "1w": 604800,
+    "1m": 60,
+    "3m": 180,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
+    "1h": 3600,
+    "2h": 7200,
+    "4h": 14400,
+    "6h": 21600,
+    "8h": 28800,
+    "12h": 43200,
+    "1d": 86400,
+    "3d": 259200,
+    "1w": 604800,
 }
 
 
@@ -103,6 +114,7 @@ def expand_grid(grid: dict) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Signal combination primitives
 # ---------------------------------------------------------------------------
+
 
 @nb.njit(cache=True)
 def sig_and(a, b):
@@ -254,6 +266,7 @@ sig_entry_exit(_w, _w, _w, _w)
 sig_confirm(_w, _w, 1)
 del _w
 
+
 def _warn_grid_size(name, grid):
     """Warn if grid produces >500 combinations."""
     sizes = [len(v) for v in grid.values() if isinstance(v, (list, tuple))]
@@ -264,10 +277,10 @@ def _warn_grid_size(name, grid):
         warnings.warn(f"Composite '{name}': grid produces {total} combinations (>500)")
 
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _ensure_list(v):
     """Normalize a scalar or list to a list."""
@@ -282,6 +295,7 @@ def _ensure_list(v):
 _counter_lock = threading.Lock()
 _counter_iter = itertools.count(1)
 
+
 def _next_id():
     with _counter_lock:
         return next(_counter_iter)
@@ -294,8 +308,10 @@ _sdk_caches = []
 # Set by run() so backtest() can report the true combo count.
 _last_n_combos: int = 0
 
+
 def _register_cache(*caches):
     _sdk_caches.extend(caches)
+
 
 def clear_sdk_cache():
     """Free all memoized sub-signal arrays."""
@@ -312,16 +328,17 @@ def _labeled_factory(inner_factory, label):
     just merges them flat — no prefix stacking.
     """
     prefix = label + "_"
+
     def factory():
         name, grid, fn = inner_factory()
         labeled_grid = {prefix + k: v for k, v in grid.items()}
 
         def labeled_fn(data, **params):
-            inner_params = {k[len(prefix):]: v
-                           for k, v in params.items() if k.startswith(prefix)}
+            inner_params = {k[len(prefix) :]: v for k, v in params.items() if k.startswith(prefix)}
             return fn(data, **inner_params)
 
         return name, labeled_grid, labeled_fn
+
     return factory
 
 
@@ -341,9 +358,11 @@ def _merge_flat(grid_l, grid_r):
         if k in collision:
             for i in range(2, 100):
                 new_k = f"{k}_{i}"
-                if (new_k not in grid_l and
-                        new_k not in rename.values() and
-                        new_k not in non_colliding_r):
+                if (
+                    new_k not in grid_l
+                    and new_k not in rename.values()
+                    and new_k not in non_colliding_r
+                ):
                     rename[k] = new_k
                     break
     grid_r_final = {rename.get(k, k): v for k, v in grid_r.items()}
@@ -357,6 +376,7 @@ def _compose_binary(combine_fn, left, right, label):
 
     Memoizes left/right sub-signals so shared parameter combos are computed once.
     """
+
     def factory():
         _, grid_l, fn_l = left._factory()
         _, grid_r, fn_r = right._factory()
@@ -394,6 +414,7 @@ def _compose_binary(combine_fn, left, right, label):
             return combine_fn(sig_l, sig_r)
 
         return label, merged, signal_fn
+
     return Signal(factory, label=label)
 
 
@@ -402,6 +423,7 @@ def _compose_entry_exit(name, entry, exit_sig):
 
     Memoizes entry/exit sub-signals so shared parameter combos are computed once.
     """
+
     def factory():
         _, grid_e, fn_e = entry._factory()
         _, grid_x, fn_x = exit_sig._factory()
@@ -439,12 +461,14 @@ def _compose_entry_exit(name, entry, exit_sig):
             return sig_entry_exit(s_el, s_xl, s_el, s_xl)
 
         return name, merged, signal_fn
+
     return factory
 
 
 # ---------------------------------------------------------------------------
 # Signal class — wraps a factory callable with chainable operators
 # ---------------------------------------------------------------------------
+
 
 class Signal:
     """Wraps an indicator factory with chainable composition operators.
@@ -463,13 +487,11 @@ class Signal:
 
     def __and__(self, other):
         """``a & b`` — both must agree."""
-        return _compose_binary(sig_and, self, other,
-                               label=f"{self._label}_{other._label}")
+        return _compose_binary(sig_and, self, other, label=f"{self._label}_{other._label}")
 
     def __or__(self, other):
         """``a | b`` — first non-zero; conflict=0."""
-        return _compose_binary(sig_or, self, other,
-                               label=f"{self._label}_{other._label}")
+        return _compose_binary(sig_or, self, other, label=f"{self._label}_{other._label}")
 
     def __invert__(self):
         """``~a`` — binary filter: 1 where signal is flat (0), 0 elsewhere.
@@ -484,22 +506,24 @@ class Signal:
         """Algebraic inversion: long becomes short, vice versa."""
         inner = self._factory
         label = self._label
+
         def factory():
             iname, grid, fn = inner()
+
             def negated_fn(data, **params):
                 return sig_not(fn(data, **params))
+
             return iname, grid, negated_fn
+
         return Signal(factory, label=label)
 
     def filter_by(self, other):
         """Signal passes only where ``other`` is active."""
-        return _compose_binary(sig_filter, self, other,
-                               label=f"{self._label}_{other._label}")
+        return _compose_binary(sig_filter, self, other, label=f"{self._label}_{other._label}")
 
     def agree(self, other):
         """Signal passes only where ``other`` agrees on direction."""
-        return _compose_binary(sig_agree, self, other,
-                               label=f"{self._label}_{other._label}")
+        return _compose_binary(sig_agree, self, other, label=f"{self._label}_{other._label}")
 
     def confirm(self, other, lookbacks=(3, 5, 8)):
         """Signal valid only if ``other`` fired same direction in last N bars."""
@@ -545,6 +569,7 @@ class Signal:
                 return sig_confirm(ss, sc, lookback)
 
             return label, merged, signal_fn
+
         return Signal(factory, label=label)
 
     def where_flat(self):
@@ -554,11 +579,15 @@ class Signal:
         """
         inner = self._factory
         label = self._label
+
         def factory():
             iname, grid, fn = inner()
+
             def flat_fn(data, **params):
                 return np.where(fn(data, **params) == 0.0, 1.0, 0.0)
+
             return iname, grid, flat_fn
+
         return Signal(factory, label=label)
 
     @staticmethod
@@ -590,8 +619,7 @@ class Signal:
 
             def signal_fn(data, **params):
                 sigs = []
-                for fn, sorted_keys, rev, cache in zip(
-                        fns, sorted_key_sets, reverse_maps, caches):
+                for fn, sorted_keys, rev, cache in zip(fns, sorted_key_sets, reverse_maps, caches):
                     key = tuple(params[k] for k in sorted_keys)
                     sig = cache.get(key)
                     if sig is None:
@@ -605,6 +633,7 @@ class Signal:
                 return sig_majority(*sigs)
 
             return label, merged, signal_fn
+
         return Signal(factory, label=label)
 
 
@@ -612,8 +641,10 @@ class Signal:
 # Signal constructors — ~25 named builders
 # ---------------------------------------------------------------------------
 
+
 def _crossover_factory(name, ta_fn, fast, slow):
     """MA crossover: long when fast > slow, short when fast < slow."""
+
     def factory():
         grid = {"fast": fast, "slow": slow}
 
@@ -628,56 +659,101 @@ def _crossover_factory(name, ta_fn, fast, slow):
             return sig
 
         return name, grid, signal_fn
+
     return factory
+
 
 # ---- Trend: MA crossovers ----
 
+
 def ema_cross(fast=(8, 12), slow=(26, 50)):
-    return Signal(_labeled_factory(
-        _crossover_factory(f"_ema{_next_id()}", talib.EMA,
-                       fast=_ensure_list(fast), slow=_ensure_list(slow)),
-        "ema"), label="ema")
+    return Signal(
+        _labeled_factory(
+            _crossover_factory(
+                f"_ema{_next_id()}", talib.EMA, fast=_ensure_list(fast), slow=_ensure_list(slow)
+            ),
+            "ema",
+        ),
+        label="ema",
+    )
+
 
 def sma_cross(fast=(10, 20), slow=(50, 100)):
-    return Signal(_labeled_factory(
-        _crossover_factory(f"_sma{_next_id()}", talib.SMA,
-                       fast=_ensure_list(fast), slow=_ensure_list(slow)),
-        "sma"), label="sma")
+    return Signal(
+        _labeled_factory(
+            _crossover_factory(
+                f"_sma{_next_id()}", talib.SMA, fast=_ensure_list(fast), slow=_ensure_list(slow)
+            ),
+            "sma",
+        ),
+        label="sma",
+    )
+
 
 def dema_cross(fast=(8, 12), slow=(26, 50)):
-    return Signal(_labeled_factory(
-        _crossover_factory(f"_dema{_next_id()}", talib.DEMA,
-                       fast=_ensure_list(fast), slow=_ensure_list(slow)),
-        "dema"), label="dema")
+    return Signal(
+        _labeled_factory(
+            _crossover_factory(
+                f"_dema{_next_id()}", talib.DEMA, fast=_ensure_list(fast), slow=_ensure_list(slow)
+            ),
+            "dema",
+        ),
+        label="dema",
+    )
+
 
 def tema_cross(fast=(8, 12), slow=(26, 50)):
-    return Signal(_labeled_factory(
-        _crossover_factory(f"_tema{_next_id()}", talib.TEMA,
-                       fast=_ensure_list(fast), slow=_ensure_list(slow)),
-        "tema"), label="tema")
+    return Signal(
+        _labeled_factory(
+            _crossover_factory(
+                f"_tema{_next_id()}", talib.TEMA, fast=_ensure_list(fast), slow=_ensure_list(slow)
+            ),
+            "tema",
+        ),
+        label="tema",
+    )
+
 
 def wma_cross(fast=(8, 12), slow=(26, 50)):
-    return Signal(_labeled_factory(
-        _crossover_factory(f"_wma{_next_id()}", talib.WMA,
-                       fast=_ensure_list(fast), slow=_ensure_list(slow)),
-        "wma"), label="wma")
+    return Signal(
+        _labeled_factory(
+            _crossover_factory(
+                f"_wma{_next_id()}", talib.WMA, fast=_ensure_list(fast), slow=_ensure_list(slow)
+            ),
+            "wma",
+        ),
+        label="wma",
+    )
+
 
 def kama_cross(fast=(8, 12), slow=(26, 50)):
-    return Signal(_labeled_factory(
-        _crossover_factory(f"_kama{_next_id()}", talib.KAMA,
-                       fast=_ensure_list(fast), slow=_ensure_list(slow)),
-        "kama"), label="kama")
+    return Signal(
+        _labeled_factory(
+            _crossover_factory(
+                f"_kama{_next_id()}", talib.KAMA, fast=_ensure_list(fast), slow=_ensure_list(slow)
+            ),
+            "kama",
+        ),
+        label="kama",
+    )
+
 
 def trima_cross(fast=(8, 12), slow=(26, 50)):
-    return Signal(_labeled_factory(
-        _crossover_factory(f"_trima{_next_id()}", talib.TRIMA,
-                       fast=_ensure_list(fast), slow=_ensure_list(slow)),
-        "trima"), label="trima")
+    return Signal(
+        _labeled_factory(
+            _crossover_factory(
+                f"_trima{_next_id()}", talib.TRIMA, fast=_ensure_list(fast), slow=_ensure_list(slow)
+            ),
+            "trima",
+        ),
+        label="trima",
+    )
 
 
 # ---- Oscillators ----
 def _threshold_factory(name, ta_fn, periods, oversold, overbought):
     """Mean reversion: long when indicator < oversold, short when > overbought."""
+
     def factory():
         grid = {"period": periods, "oversold": oversold, "overbought": overbought}
 
@@ -689,55 +765,88 @@ def _threshold_factory(name, ta_fn, periods, oversold, overbought):
             return sig
 
         return name, grid, signal_fn
+
     return factory
 
 
 def rsi(periods=(14,), oversold=(30,), overbought=(70,)):
-    return Signal(_labeled_factory(
-        _threshold_factory(f"_rsi{_next_id()}", talib.RSI,
-                       periods=_ensure_list(periods),
-                       oversold=_ensure_list(oversold),
-                       overbought=_ensure_list(overbought)),
-        "rsi"), label="rsi")
+    return Signal(
+        _labeled_factory(
+            _threshold_factory(
+                f"_rsi{_next_id()}",
+                talib.RSI,
+                periods=_ensure_list(periods),
+                oversold=_ensure_list(oversold),
+                overbought=_ensure_list(overbought),
+            ),
+            "rsi",
+        ),
+        label="rsi",
+    )
+
 
 def cmo(periods=(14,), oversold=(-50,), overbought=(50,)):
-    return Signal(_labeled_factory(
-        _threshold_factory(f"_cmo{_next_id()}", talib.CMO,
-                       periods=_ensure_list(periods),
-                       oversold=_ensure_list(oversold),
-                       overbought=_ensure_list(overbought)),
-        "cmo"), label="cmo")
+    return Signal(
+        _labeled_factory(
+            _threshold_factory(
+                f"_cmo{_next_id()}",
+                talib.CMO,
+                periods=_ensure_list(periods),
+                oversold=_ensure_list(oversold),
+                overbought=_ensure_list(overbought),
+            ),
+            "cmo",
+        ),
+        label="cmo",
+    )
+
 
 def _stochrsi_factory(name, periods, fastk, fastd, oversold, overbought):
     """Stochastic RSI: long when %D < oversold, short when > overbought."""
+
     def factory():
-        grid = {"period": periods, "fastk": fastk, "fastd": fastd,
-                "oversold": oversold, "overbought": overbought}
+        grid = {
+            "period": periods,
+            "fastk": fastk,
+            "fastd": fastd,
+            "oversold": oversold,
+            "overbought": overbought,
+        }
 
         def signal_fn(data, period, fastk, fastd, oversold, overbought):
             close = data["close"]
             _, d = _cached(
-                talib.STOCHRSI, close, timeperiod=period, fastk_period=fastk, fastd_period=fastd)
+                talib.STOCHRSI, close, timeperiod=period, fastk_period=fastk, fastd_period=fastd
+            )
             sig = np.where(d < oversold, 1.0, np.where(d > overbought, -1.0, 0.0))
             sig[np.isnan(d)] = 0.0
             return sig
 
         return name, grid, signal_fn
+
     return factory
 
-def stoch_rsi(periods=(14,), fastk=(3,), fastd=(3,),
-              oversold=(20,), overbought=(80,)):
-    return Signal(_labeled_factory(
-        _stochrsi_factory(f"_stochrsi{_next_id()}",
-                      periods=_ensure_list(periods),
-                      fastk=_ensure_list(fastk),
-                      fastd=_ensure_list(fastd),
-                      oversold=_ensure_list(oversold),
-                      overbought=_ensure_list(overbought)),
-        "stochrsi"), label="stochrsi")
+
+def stoch_rsi(periods=(14,), fastk=(3,), fastd=(3,), oversold=(20,), overbought=(80,)):
+    return Signal(
+        _labeled_factory(
+            _stochrsi_factory(
+                f"_stochrsi{_next_id()}",
+                periods=_ensure_list(periods),
+                fastk=_ensure_list(fastk),
+                fastd=_ensure_list(fastd),
+                oversold=_ensure_list(oversold),
+                overbought=_ensure_list(overbought),
+            ),
+            "stochrsi",
+        ),
+        label="stochrsi",
+    )
+
 
 def _threshold_hlc_factory(name, ta_fn, periods, oversold, overbought):
     """HLC oscillator with threshold: long < oversold, short > overbought."""
+
     def factory():
         grid = {"period": periods, "oversold": oversold, "overbought": overbought}
 
@@ -749,27 +858,45 @@ def _threshold_hlc_factory(name, ta_fn, periods, oversold, overbought):
             return sig
 
         return name, grid, signal_fn
+
     return factory
 
 
 def cci(periods=(14,), oversold=(-100,), overbought=(100,)):
-    return Signal(_labeled_factory(
-        _threshold_hlc_factory(f"_cci{_next_id()}", talib.CCI,
-                           periods=_ensure_list(periods),
-                           oversold=_ensure_list(oversold),
-                           overbought=_ensure_list(overbought)),
-        "cci"), label="cci")
+    return Signal(
+        _labeled_factory(
+            _threshold_hlc_factory(
+                f"_cci{_next_id()}",
+                talib.CCI,
+                periods=_ensure_list(periods),
+                oversold=_ensure_list(oversold),
+                overbought=_ensure_list(overbought),
+            ),
+            "cci",
+        ),
+        label="cci",
+    )
+
 
 def willr(periods=(14,), oversold=(-80,), overbought=(-20,)):
-    return Signal(_labeled_factory(
-        _threshold_hlc_factory(f"_willr{_next_id()}", talib.WILLR,
-                           periods=_ensure_list(periods),
-                           oversold=_ensure_list(oversold),
-                           overbought=_ensure_list(overbought)),
-        "willr"), label="willr")
+    return Signal(
+        _labeled_factory(
+            _threshold_hlc_factory(
+                f"_willr{_next_id()}",
+                talib.WILLR,
+                periods=_ensure_list(periods),
+                oversold=_ensure_list(oversold),
+                overbought=_ensure_list(overbought),
+            ),
+            "willr",
+        ),
+        label="willr",
+    )
+
 
 def _threshold_hlcv_factory(name, ta_fn, periods, oversold, overbought):
     """HLCV oscillator with threshold (MFI): long < oversold, short > overbought."""
+
     def factory():
         grid = {"period": periods, "oversold": oversold, "overbought": overbought}
 
@@ -781,48 +908,75 @@ def _threshold_hlcv_factory(name, ta_fn, periods, oversold, overbought):
             return sig
 
         return name, grid, signal_fn
+
     return factory
 
+
 def mfi(periods=(14,), oversold=(20,), overbought=(80,)):
-    return Signal(_labeled_factory(
-        _threshold_hlcv_factory(f"_mfi{_next_id()}", talib.MFI,
-                            periods=_ensure_list(periods),
-                            oversold=_ensure_list(oversold),
-                            overbought=_ensure_list(overbought)),
-        "mfi"), label="mfi")
+    return Signal(
+        _labeled_factory(
+            _threshold_hlcv_factory(
+                f"_mfi{_next_id()}",
+                talib.MFI,
+                periods=_ensure_list(periods),
+                oversold=_ensure_list(oversold),
+                overbought=_ensure_list(overbought),
+            ),
+            "mfi",
+        ),
+        label="mfi",
+    )
+
 
 def _ultosc_factory(name, p1_list, p2_list, p3_list, oversold, overbought):
     """Ultimate Oscillator with 3 periods and threshold levels."""
+
     def factory():
-        grid = {"p1": p1_list, "p2": p2_list, "p3": p3_list,
-                "oversold": oversold, "overbought": overbought}
+        grid = {
+            "p1": p1_list,
+            "p2": p2_list,
+            "p3": p3_list,
+            "oversold": oversold,
+            "overbought": overbought,
+        }
 
         def signal_fn(data, p1, p2, p3, oversold, overbought):
             high, low, close = data["high"], data["low"], data["close"]
-            ind = _cached(talib.ULTOSC, high, low, close,
-                          timeperiod1=p1, timeperiod2=p2, timeperiod3=p3)
+            ind = _cached(
+                talib.ULTOSC, high, low, close, timeperiod1=p1, timeperiod2=p2, timeperiod3=p3
+            )
             sig = np.where(ind < oversold, 1.0, np.where(ind > overbought, -1.0, 0.0))
             sig[np.isnan(ind)] = 0.0
             return sig
 
         return name, grid, signal_fn
+
     return factory
 
+
 def ultimate_osc(p1=(7,), p2=(14,), p3=(28,), oversold=(30,), overbought=(70,)):
-    return Signal(_labeled_factory(
-        _ultosc_factory(f"_ultosc{_next_id()}",
-                    p1_list=_ensure_list(p1),
-                    p2_list=_ensure_list(p2),
-                    p3_list=_ensure_list(p3),
-                    oversold=_ensure_list(oversold),
-                    overbought=_ensure_list(overbought)),
-        "ultosc"), label="ultosc")
+    return Signal(
+        _labeled_factory(
+            _ultosc_factory(
+                f"_ultosc{_next_id()}",
+                p1_list=_ensure_list(p1),
+                p2_list=_ensure_list(p2),
+                p3_list=_ensure_list(p3),
+                oversold=_ensure_list(oversold),
+                overbought=_ensure_list(overbought),
+            ),
+            "ultosc",
+        ),
+        label="ultosc",
+    )
 
 
 # ---- Momentum ----
 
+
 def _macd_factory(name, fast, slow, signal_period):
     """MACD: long when MACD line > signal line, short when below."""
+
     def factory():
         grid = {"fast": fast, "slow": slow, "signal_period": signal_period}
 
@@ -831,24 +985,35 @@ def _macd_factory(name, fast, slow, signal_period):
             if fast >= slow:
                 return np.zeros(len(close))
             macd_line, sig_line, _ = _cached(
-                talib.MACD, close, fastperiod=fast, slowperiod=slow, signalperiod=signal_period)
+                talib.MACD, close, fastperiod=fast, slowperiod=slow, signalperiod=signal_period
+            )
             sig = np.where(macd_line > sig_line, 1.0, np.where(macd_line < sig_line, -1.0, 0.0))
             sig[np.isnan(sig_line)] = 0.0
             return sig
 
         return name, grid, signal_fn
+
     return factory
 
+
 def macd_signal(fast=(12,), slow=(26,), signal_period=(9,)):
-    return Signal(_labeled_factory(
-        _macd_factory(f"_macd{_next_id()}",
-                  fast=_ensure_list(fast),
-                  slow=_ensure_list(slow),
-                  signal_period=_ensure_list(signal_period)),
-        "macd"), label="macd")
+    return Signal(
+        _labeled_factory(
+            _macd_factory(
+                f"_macd{_next_id()}",
+                fast=_ensure_list(fast),
+                slow=_ensure_list(slow),
+                signal_period=_ensure_list(signal_period),
+            ),
+            "macd",
+        ),
+        label="macd",
+    )
+
 
 def _dual_zero_cross_factory(name, ta_fn, fast, slow):
     """Two-param oscillator zero-line cross: long when > 0, short when < 0."""
+
     def factory():
         grid = {"fast": fast, "slow": slow}
 
@@ -862,24 +1027,37 @@ def _dual_zero_cross_factory(name, ta_fn, fast, slow):
             return sig
 
         return name, grid, signal_fn
+
     return factory
 
+
 def apo(fast=(12,), slow=(26,)):
-    return Signal(_labeled_factory(
-        _dual_zero_cross_factory(f"_apo{_next_id()}", talib.APO,
-                             fast=_ensure_list(fast),
-                             slow=_ensure_list(slow)),
-        "apo"), label="apo")
+    return Signal(
+        _labeled_factory(
+            _dual_zero_cross_factory(
+                f"_apo{_next_id()}", talib.APO, fast=_ensure_list(fast), slow=_ensure_list(slow)
+            ),
+            "apo",
+        ),
+        label="apo",
+    )
+
 
 def ppo(fast=(12,), slow=(26,)):
-    return Signal(_labeled_factory(
-        _dual_zero_cross_factory(f"_ppo{_next_id()}", talib.PPO,
-                             fast=_ensure_list(fast),
-                             slow=_ensure_list(slow)),
-        "ppo"), label="ppo")
+    return Signal(
+        _labeled_factory(
+            _dual_zero_cross_factory(
+                f"_ppo{_next_id()}", talib.PPO, fast=_ensure_list(fast), slow=_ensure_list(slow)
+            ),
+            "ppo",
+        ),
+        label="ppo",
+    )
+
 
 def _zero_cross_factory(name, ta_fn, periods):
     """Momentum: long when indicator > 0, short when < 0."""
+
     def factory():
         grid = {"period": periods}
 
@@ -891,30 +1069,44 @@ def _zero_cross_factory(name, ta_fn, periods):
             return sig
 
         return name, grid, signal_fn
+
     return factory
 
+
 def mom(periods=(10,)):
-    return Signal(_labeled_factory(
-        _zero_cross_factory(f"_mom{_next_id()}", talib.MOM,
-                        periods=_ensure_list(periods)),
-        "mom"), label="mom")
+    return Signal(
+        _labeled_factory(
+            _zero_cross_factory(f"_mom{_next_id()}", talib.MOM, periods=_ensure_list(periods)),
+            "mom",
+        ),
+        label="mom",
+    )
+
 
 def roc(periods=(10,)):
-    return Signal(_labeled_factory(
-        _zero_cross_factory(f"_roc{_next_id()}", talib.ROC,
-                        periods=_ensure_list(periods)),
-        "roc"), label="roc")
+    return Signal(
+        _labeled_factory(
+            _zero_cross_factory(f"_roc{_next_id()}", talib.ROC, periods=_ensure_list(periods)),
+            "roc",
+        ),
+        label="roc",
+    )
+
 
 def trix(periods=(14,)):
-    return Signal(_labeled_factory(
-        _zero_cross_factory(f"_trix{_next_id()}", talib.TRIX,
-                        periods=_ensure_list(periods)),
-        "trix"), label="trix")
+    return Signal(
+        _labeled_factory(
+            _zero_cross_factory(f"_trix{_next_id()}", talib.TRIX, periods=_ensure_list(periods)),
+            "trix",
+        ),
+        label="trix",
+    )
 
 
 # ---- Trend strength ----
 def _trend_strength_factory(name, ta_fn, periods, thresholds):
     """ADX/DX trend strength: trade in trend direction when indicator > threshold."""
+
     def factory():
         grid = {"period": periods, "threshold": thresholds}
 
@@ -929,31 +1121,58 @@ def _trend_strength_factory(name, ta_fn, periods, thresholds):
             return sig
 
         return name, grid, signal_fn
+
     return factory
 
+
 def adx(periods=(14,), thresholds=(25,)):
-    return Signal(_labeled_factory(
-        _trend_strength_factory(f"_adx{_next_id()}", talib.ADX,
-                            periods=_ensure_list(periods),
-                            thresholds=_ensure_list(thresholds)),
-        "adx"), label="adx")
+    return Signal(
+        _labeled_factory(
+            _trend_strength_factory(
+                f"_adx{_next_id()}",
+                talib.ADX,
+                periods=_ensure_list(periods),
+                thresholds=_ensure_list(thresholds),
+            ),
+            "adx",
+        ),
+        label="adx",
+    )
+
 
 def adxr(periods=(14,), thresholds=(25,)):
-    return Signal(_labeled_factory(
-        _trend_strength_factory(f"_adxr{_next_id()}", talib.ADXR,
-                            periods=_ensure_list(periods),
-                            thresholds=_ensure_list(thresholds)),
-        "adxr"), label="adxr")
+    return Signal(
+        _labeled_factory(
+            _trend_strength_factory(
+                f"_adxr{_next_id()}",
+                talib.ADXR,
+                periods=_ensure_list(periods),
+                thresholds=_ensure_list(thresholds),
+            ),
+            "adxr",
+        ),
+        label="adxr",
+    )
+
 
 def dx(periods=(14,), thresholds=(25,)):
-    return Signal(_labeled_factory(
-        _trend_strength_factory(f"_dx{_next_id()}", talib.DX,
-                            periods=_ensure_list(periods),
-                            thresholds=_ensure_list(thresholds)),
-        "dx"), label="dx")
+    return Signal(
+        _labeled_factory(
+            _trend_strength_factory(
+                f"_dx{_next_id()}",
+                talib.DX,
+                periods=_ensure_list(periods),
+                thresholds=_ensure_list(thresholds),
+            ),
+            "dx",
+        ),
+        label="dx",
+    )
+
 
 def _di_crossover_factory(name, periods):
     """PLUS_DI vs MINUS_DI: long when plus > minus, short when below."""
+
     def factory():
         grid = {"period": periods}
 
@@ -966,16 +1185,22 @@ def _di_crossover_factory(name, periods):
             return sig
 
         return name, grid, signal_fn
+
     return factory
 
+
 def di_cross(periods=(14,)):
-    return Signal(_labeled_factory(
-        _di_crossover_factory(f"_di{_next_id()}",
-                          periods=_ensure_list(periods)),
-        "di"), label="di")
+    return Signal(
+        _labeled_factory(
+            _di_crossover_factory(f"_di{_next_id()}", periods=_ensure_list(periods)), "di"
+        ),
+        label="di",
+    )
+
 
 def _dm_crossover_factory(name, periods):
     """PLUS_DM vs MINUS_DM: long when plus > minus, short when below."""
+
     def factory():
         grid = {"period": periods}
 
@@ -988,18 +1213,23 @@ def _dm_crossover_factory(name, periods):
             return sig
 
         return name, grid, signal_fn
+
     return factory
 
+
 def dm_cross(periods=(14,)):
-    return Signal(_labeled_factory(
-        _dm_crossover_factory(f"_dm{_next_id()}",
-                          periods=_ensure_list(periods)),
-        "dm"), label="dm")
+    return Signal(
+        _labeled_factory(
+            _dm_crossover_factory(f"_dm{_next_id()}", periods=_ensure_list(periods)), "dm"
+        ),
+        label="dm",
+    )
 
 
 # ---- Volume ----
 def _obv_crossover_factory(name, ma_periods):
     """OBV vs SMA(OBV): long when OBV > SMA(OBV), short when below."""
+
     def factory():
         grid = {"ma_period": ma_periods}
 
@@ -1012,16 +1242,22 @@ def _obv_crossover_factory(name, ma_periods):
             return sig
 
         return name, grid, signal_fn
+
     return factory
 
+
 def obv(ma_periods=(20,)):
-    return Signal(_labeled_factory(
-        _obv_crossover_factory(f"_obv{_next_id()}",
-                 ma_periods=_ensure_list(ma_periods)),
-        "obv"), label="obv")
+    return Signal(
+        _labeled_factory(
+            _obv_crossover_factory(f"_obv{_next_id()}", ma_periods=_ensure_list(ma_periods)), "obv"
+        ),
+        label="obv",
+    )
+
 
 def _ad_crossover_factory(name, ma_periods):
     """AD vs SMA(AD): long when AD > SMA(AD), short when below."""
+
     def factory():
         grid = {"ma_period": ma_periods}
 
@@ -1034,16 +1270,22 @@ def _ad_crossover_factory(name, ma_periods):
             return sig
 
         return name, grid, signal_fn
+
     return factory
 
+
 def ad(ma_periods=(20,)):
-    return Signal(_labeled_factory(
-        _ad_crossover_factory(f"_ad{_next_id()}",
-                ma_periods=_ensure_list(ma_periods)),
-        "ad"), label="ad")
+    return Signal(
+        _labeled_factory(
+            _ad_crossover_factory(f"_ad{_next_id()}", ma_periods=_ensure_list(ma_periods)), "ad"
+        ),
+        label="ad",
+    )
+
 
 def _adosc_zero_cross_factory(name, fast_periods, slow_periods):
     """ADOSC: long when > 0, short when < 0."""
+
     def factory():
         grid = {"fast": fast_periods, "slow": slow_periods}
 
@@ -1051,49 +1293,66 @@ def _adosc_zero_cross_factory(name, fast_periods, slow_periods):
             high, low, close, volume = data["high"], data["low"], data["close"], data["volume"]
             if fast >= slow:
                 return np.zeros(len(close))
-            ind = _cached(talib.ADOSC, high, low, close, volume,
-                          fastperiod=fast, slowperiod=slow)
+            ind = _cached(talib.ADOSC, high, low, close, volume, fastperiod=fast, slowperiod=slow)
             sig = np.where(ind > 0, 1.0, np.where(ind < 0, -1.0, 0.0))
             sig[np.isnan(ind)] = 0.0
             return sig
 
         return name, grid, signal_fn
+
     return factory
 
+
 def adosc(fast=(3,), slow=(10,)):
-    return Signal(_labeled_factory(
-        _adosc_zero_cross_factory(f"_adosc{_next_id()}",
-                   fast_periods=_ensure_list(fast),
-                   slow_periods=_ensure_list(slow)),
-        "adosc"), label="adosc")
+    return Signal(
+        _labeled_factory(
+            _adosc_zero_cross_factory(
+                f"_adosc{_next_id()}",
+                fast_periods=_ensure_list(fast),
+                slow_periods=_ensure_list(slow),
+            ),
+            "adosc",
+        ),
+        label="adosc",
+    )
 
 
 # ---- Volatility ----
 def _bollinger_factory(name, windows, num_std):
     """Bollinger Bands mean reversion: long below lower band, short above upper."""
+
     def factory():
         grid = {"window": windows, "num_std": num_std}
 
         def signal_fn(data, window, num_std):
             close = data["close"]
             upper, _, lower = _cached(
-                talib.BBANDS, close, timeperiod=window, nbdevup=num_std, nbdevdn=num_std)
+                talib.BBANDS, close, timeperiod=window, nbdevup=num_std, nbdevdn=num_std
+            )
             sig = np.where(close < lower, 1.0, np.where(close > upper, -1.0, 0.0))
             sig[np.isnan(upper)] = 0.0
             return sig
 
         return name, grid, signal_fn
+
     return factory
 
+
 def bollinger_bands(windows=(20,), num_std=(2.0,)):
-    return Signal(_labeled_factory(
-        _bollinger_factory(f"_bb{_next_id()}",
-                       windows=_ensure_list(windows),
-                       num_std=_ensure_list(num_std)),
-        "bb"), label="bb")
+    return Signal(
+        _labeled_factory(
+            _bollinger_factory(
+                f"_bb{_next_id()}", windows=_ensure_list(windows), num_std=_ensure_list(num_std)
+            ),
+            "bb",
+        ),
+        label="bb",
+    )
+
 
 def _volatility_breakout_factory(name, ta_fn, periods, lookbacks):
     """High volatility + price direction: trade when ATR/NATR is expanding."""
+
     def factory():
         grid = {"period": periods, "lookback": lookbacks}
 
@@ -1107,31 +1366,49 @@ def _volatility_breakout_factory(name, ta_fn, periods, lookbacks):
             prev_close = np.empty_like(close)
             prev_close[:lookback] = np.nan
             prev_close[lookback:] = close[:-lookback]
-            direction = np.where(close > prev_close, 1.0,
-                                 np.where(close < prev_close, -1.0, 0.0))
+            direction = np.where(close > prev_close, 1.0, np.where(close < prev_close, -1.0, 0.0))
             sig = np.where(atr > atr_ma, direction, 0.0)
             sig[np.isnan(atr_ma) | np.isnan(prev_close)] = 0.0
             return sig
 
         return name, grid, signal_fn
+
     return factory
 
+
 def atr_breakout(periods=(14,), lookbacks=(20,)):
-    return Signal(_labeled_factory(
-        _volatility_breakout_factory(f"_atrbrk{_next_id()}", talib.ATR,
-                                 periods=_ensure_list(periods),
-                                 lookbacks=_ensure_list(lookbacks)),
-        "atr"), label="atr")
+    return Signal(
+        _labeled_factory(
+            _volatility_breakout_factory(
+                f"_atrbrk{_next_id()}",
+                talib.ATR,
+                periods=_ensure_list(periods),
+                lookbacks=_ensure_list(lookbacks),
+            ),
+            "atr",
+        ),
+        label="atr",
+    )
+
 
 def natr_breakout(periods=(14,), lookbacks=(20,)):
-    return Signal(_labeled_factory(
-        _volatility_breakout_factory(f"_natrbrk{_next_id()}", talib.NATR,
-                                 periods=_ensure_list(periods),
-                                 lookbacks=_ensure_list(lookbacks)),
-        "natr"), label="natr")
+    return Signal(
+        _labeled_factory(
+            _volatility_breakout_factory(
+                f"_natrbrk{_next_id()}",
+                talib.NATR,
+                periods=_ensure_list(periods),
+                lookbacks=_ensure_list(lookbacks),
+            ),
+            "natr",
+        ),
+        label="natr",
+    )
+
 
 def _breakout_factory(name, periods):
     """Channel breakout: long when close > prev MAX, short when < prev MIN."""
+
     def factory():
         grid = {"period": periods}
 
@@ -1151,18 +1428,23 @@ def _breakout_factory(name, periods):
             return sig
 
         return name, grid, signal_fn
+
     return factory
 
+
 def channel_breakout(periods=(20,)):
-    return Signal(_labeled_factory(
-        _breakout_factory(f"_chan{_next_id()}",
-                      periods=_ensure_list(periods)),
-        "chan"), label="chan")
+    return Signal(
+        _labeled_factory(
+            _breakout_factory(f"_chan{_next_id()}", periods=_ensure_list(periods)), "chan"
+        ),
+        label="chan",
+    )
 
 
 # ---- Exit signals ----
 def _sar_crossover_factory(name, accelerations, maximums):
     """Close vs SAR: long when close > SAR, short when below."""
+
     def factory():
         grid = {"acceleration": accelerations, "maximum": maximums}
 
@@ -1174,24 +1456,36 @@ def _sar_crossover_factory(name, accelerations, maximums):
             return sig
 
         return name, grid, signal_fn
+
     return factory
 
+
 def sar(accelerations=(0.02,), maximums=(0.2,)):
-    return Signal(_labeled_factory(
-        _sar_crossover_factory(f"_sar{_next_id()}",
-                 accelerations=_ensure_list(accelerations),
-                 maximums=_ensure_list(maximums)),
-        "sar"), label="sar")
+    return Signal(
+        _labeled_factory(
+            _sar_crossover_factory(
+                f"_sar{_next_id()}",
+                accelerations=_ensure_list(accelerations),
+                maximums=_ensure_list(maximums),
+            ),
+            "sar",
+        ),
+        label="sar",
+    )
+
 
 def _sarext_crossover_factory(name, accel_inits, accelerations, maximums):
     """Close vs SAREXT: symmetric long/short params."""
+
     def factory():
         grid = {"accel_init": accel_inits, "acceleration": accelerations, "maximum": maximums}
 
         def signal_fn(data, accel_init, acceleration, maximum):
             high, low, close = data["high"], data["low"], data["close"]
             sar = _cached(
-                talib.SAREXT, high, low,
+                talib.SAREXT,
+                high,
+                low,
                 startvalue=0.0,
                 offsetonreverse=0.0,
                 accelerationinitlong=accel_init,
@@ -1206,21 +1500,31 @@ def _sarext_crossover_factory(name, accel_inits, accelerations, maximums):
             return sig
 
         return name, grid, signal_fn
+
     return factory
 
+
 def sar_ext(accel_inits=(0.02,), accelerations=(0.02,), maximums=(0.2,)):
-    return Signal(_labeled_factory(
-        _sarext_crossover_factory(f"_sarext{_next_id()}",
-                    accel_inits=_ensure_list(accel_inits),
-                    accelerations=_ensure_list(accelerations),
-                    maximums=_ensure_list(maximums)),
-        "sarext"), label="sarext")
+    return Signal(
+        _labeled_factory(
+            _sarext_crossover_factory(
+                f"_sarext{_next_id()}",
+                accel_inits=_ensure_list(accel_inits),
+                accelerations=_ensure_list(accelerations),
+                maximums=_ensure_list(maximums),
+            ),
+            "sarext",
+        ),
+        label="sarext",
+    )
 
 
 # ---- Candlestick patterns ----
 
+
 def _candlestick_factory(name, ta_fn, penetration_values=None):
     """CDL pattern: maps -100/0/100 output to -1/0/1."""
+
     def factory():
         if penetration_values:
             grid = {"penetration": penetration_values}
@@ -1237,19 +1541,25 @@ def _candlestick_factory(name, ta_fn, penetration_values=None):
             return sig
 
         return name, grid, signal_fn
+
     return factory
+
 
 def candlestick_pattern(name, penetration_values=None):
     """Candlestick pattern by TA-Lib function name (e.g. 'CDLENGULFING')."""
     ta_fn = getattr(talib, name)
     pv = _ensure_list(penetration_values) if penetration_values else None
     label = name.lower().replace("cdl", "cdl_") if name.startswith("CDL") else name.lower()
-    return Signal(_labeled_factory(
-        _candlestick_factory(f"_cdl{_next_id()}", ta_fn, penetration_values=pv),
-        label), label=label)
+    return Signal(
+        _labeled_factory(
+            _candlestick_factory(f"_cdl{_next_id()}", ta_fn, penetration_values=pv), label
+        ),
+        label=label,
+    )
 
 
 # ---- Escape hatches ----
+
 
 def indicator(factory_fn, *args, label="ind", **kwargs):
     """Wrap any external factory callable as a Signal."""
@@ -1262,14 +1572,17 @@ def custom(fn, label="custom", **grid):
     ``fn`` receives ``(data, **params)`` and returns a float64 array in {-1,0,1}.
     Each kwarg is a list of values to sweep.
     """
+
     def factory():
         return f"_custom{_next_id()}", grid, fn
+
     return Signal(factory, label=label)
 
 
 # ---------------------------------------------------------------------------
 # Strategy class
 # ---------------------------------------------------------------------------
+
 
 class Strategy:
     """Named strategy with either a direct signal or entry/exit pair.
@@ -1287,17 +1600,32 @@ class Strategy:
                  stop_loss=[2, 3], take_profit=[5, 10])
     """
 
-    def __init__(self, name, *, signal=None, entry=None, exit=None,
-                 stop_loss=None, take_profit=None,
-                 trailing_stop=None, fee=None, slippage=0.05,
-                 capital=10000.0, fraction=1.0, top=10,
-                 sort="sharpe_ratio", long_only=False,
-                 risk_free_rate=0.0, validate=False,
-                 train_ratio=0.7, n_splits=5,
-                 atr_period=14,
-                 atr_stop_mult=None,
-                 atr_tp_mult=None,
-                 atr_trail_mult=None):
+    def __init__(
+        self,
+        name,
+        *,
+        signal=None,
+        entry=None,
+        exit=None,
+        stop_loss=None,
+        take_profit=None,
+        trailing_stop=None,
+        fee=None,
+        slippage=0.05,
+        capital=10000.0,
+        fraction=1.0,
+        top=10,
+        sort="sharpe_ratio",
+        long_only=False,
+        risk_free_rate=0.0,
+        validate=False,
+        train_ratio=0.7,
+        n_splits=5,
+        atr_period=14,
+        atr_stop_mult=None,
+        atr_tp_mult=None,
+        atr_trail_mult=None,
+    ):
         self.name = name
         if signal is not None:
             if entry is not None or exit is not None:
@@ -1330,14 +1658,17 @@ class Strategy:
     @property
     def has_atr_managed(self):
         """True if ATR-based position management is configured."""
-        return any(x is not None for x in (
-            self.atr_stop_mult, self.atr_tp_mult, self.atr_trail_mult))
+        return any(
+            x is not None for x in (self.atr_stop_mult, self.atr_tp_mult, self.atr_trail_mult)
+        )
 
     @property
     def has_managed(self):
         """True if any position management parameter is set."""
-        return any(x is not None for x in (
-            self.stop_loss, self.take_profit, self.trailing_stop)) or self.has_atr_managed
+        return (
+            any(x is not None for x in (self.stop_loss, self.take_profit, self.trailing_stop))
+            or self.has_atr_managed
+        )
 
     def as_factory(self):
         return self._factory
@@ -1350,10 +1681,28 @@ class Strategy:
 # Pipeline: backtest() and run()
 # ---------------------------------------------------------------------------
 
-def _attach_equity_curves(results, close, high, low, open_arr, strat_lookup, data,
-                          fee_dec, slip_dec, capital, fraction, ann, rf_per_bar,
-                          use_managed, strategies, name_to_strat_idx, long_only,
-                          bar_offset=0, atr_arr=None):
+
+def _attach_equity_curves(
+    results,
+    close,
+    high,
+    low,
+    open_arr,
+    strat_lookup,
+    data,
+    fee_dec,
+    slip_dec,
+    capital,
+    fraction,
+    ann,
+    rf_per_bar,
+    use_managed,
+    strategies,
+    name_to_strat_idx,
+    long_only,
+    bar_offset=0,
+    atr_arr=None,
+):
     """Attach equity curves to ranked results; regenerates each signal on-demand."""
     pm_keys = {"stop_loss", "take_profit", "trailing_stop"}
     n_bars = len(close)
@@ -1369,29 +1718,85 @@ def _attach_equity_curves(results, close, high, low, open_arr, strat_lookup, dat
         sig = shifted[bar_offset : bar_offset + n_bars]
         use_atr = atr_arr is not None and any(s.has_atr_managed for s in strategies)
         if use_atr:
-            sl_m    = r.params.get("atr_sl_mult",    0.0)
-            tp_m    = r.params.get("atr_tp_mult",    0.0)
+            sl_m = r.params.get("atr_sl_mult", 0.0)
+            tp_m = r.params.get("atr_tp_mult", 0.0)
             trail_m = r.params.get("atr_trail_mult", 0.0)
             r.equity_curve = backtest_one_atr_managed_equity(
-                close, high, low, open_arr, sig, fee_dec, slip_dec,
-                capital, fraction, ann, rf_per_bar, 0.0,
-                atr_arr, sl_m, tp_m, trail_m)
+                close,
+                high,
+                low,
+                open_arr,
+                sig,
+                fee_dec,
+                slip_dec,
+                capital,
+                fraction,
+                ann,
+                rf_per_bar,
+                0.0,
+                atr_arr,
+                sl_m,
+                tp_m,
+                trail_m,
+            )
         elif use_managed:
             sl_v = r.params.get("stop_loss", 0.0) / 100.0 if "stop_loss" in r.params else 0.0
             tp_v = r.params.get("take_profit", 0.0) / 100.0 if "take_profit" in r.params else 0.0
-            trail_v = r.params.get("trailing_stop", 0.0) / 100.0 if "trailing_stop" in r.params else 0.0
+            trail_v = (
+                r.params.get("trailing_stop", 0.0) / 100.0 if "trailing_stop" in r.params else 0.0
+            )
             r.equity_curve = backtest_one_managed_equity(
-                close, high, low, open_arr, sig, fee_dec, slip_dec,
-                capital, fraction, ann, rf_per_bar,
-                0.0, sl_v, tp_v, trail_v)
+                close,
+                high,
+                low,
+                open_arr,
+                sig,
+                fee_dec,
+                slip_dec,
+                capital,
+                fraction,
+                ann,
+                rf_per_bar,
+                0.0,
+                sl_v,
+                tp_v,
+                trail_v,
+            )
         else:
             r.equity_curve = backtest_one_equity(
-                close, high, low, open_arr, sig, fee_dec, slip_dec, capital, fraction, ann, rf_per_bar)
+                close,
+                high,
+                low,
+                open_arr,
+                sig,
+                fee_dec,
+                slip_dec,
+                capital,
+                fraction,
+                ann,
+                rf_per_bar,
+            )
 
 
-def _run_batch(close, high, low, open_arr, signals_2d, combos, combo_strat, strategies,
-               fee_dec, slip_dec, capital, fraction, ann, rf_per_bar, use_managed,
-               combo_indices=None, atr_arr=None):
+def _run_batch(
+    close,
+    high,
+    low,
+    open_arr,
+    signals_2d,
+    combos,
+    combo_strat,
+    strategies,
+    fee_dec,
+    slip_dec,
+    capital,
+    fraction,
+    ann,
+    rf_per_bar,
+    use_managed,
+    combo_indices=None,
+    atr_arr=None,
+):
     """Run backtests for given combos. If combo_indices is given, only run those."""
     if combo_indices is not None:
         run_combos = [combos[i] for i in combo_indices]
@@ -1410,8 +1815,8 @@ def _run_batch(close, high, low, open_arr, signals_2d, combos, combo_strat, stra
 
         for base_i, (name, params) in enumerate(run_combos):
             strat = strategies[run_combo_strat[base_i]]
-            sl_mults  = strat.atr_stop_mult  if strat.atr_stop_mult  else [0.0]
-            tp_mults  = strat.atr_tp_mult    if strat.atr_tp_mult    else [0.0]
+            sl_mults = strat.atr_stop_mult if strat.atr_stop_mult else [0.0]
+            tp_mults = strat.atr_tp_mult if strat.atr_tp_mult else [0.0]
             trail_mults = strat.atr_trail_mult if strat.atr_trail_mult else [0.0]
 
             for sl_m, tp_m, trail_m in product(sl_mults, tp_mults, trail_mults):
@@ -1426,45 +1831,85 @@ def _run_batch(close, high, low, open_arr, signals_2d, combos, combo_strat, stra
                 expanded_combos.append((name, pm_params))
 
         n_exp = len(expanded_indices)
-        sig_indices_arr  = np.empty(n_exp, dtype=np.int64)
-        sl_mult_arr_     = np.empty(n_exp, dtype=np.float64)
-        tp_mult_arr_     = np.empty(n_exp, dtype=np.float64)
-        trail_mult_arr_  = np.empty(n_exp, dtype=np.float64)
+        sig_indices_arr = np.empty(n_exp, dtype=np.int64)
+        sl_mult_arr_ = np.empty(n_exp, dtype=np.float64)
+        tp_mult_arr_ = np.empty(n_exp, dtype=np.float64)
+        trail_mult_arr_ = np.empty(n_exp, dtype=np.float64)
 
         for idx, (base_i, sl_m, tp_m, trail_m) in enumerate(expanded_indices):
             sig_indices_arr[idx] = base_i
-            sl_mult_arr_[idx]    = sl_m
-            tp_mult_arr_[idx]    = tp_m
+            sl_mult_arr_[idx] = sl_m
+            tp_mult_arr_[idx] = tp_m
             trail_mult_arr_[idx] = trail_m
 
         metrics_2d = backtest_batch_atr_managed(
-            close, high, low, open_arr, run_signals, atr_arr,
-            fee_dec, slip_dec, capital, fraction, ann, rf_per_bar, 0.0,
-            sig_indices_arr, sl_mult_arr_, tp_mult_arr_, trail_mult_arr_)
+            close,
+            high,
+            low,
+            open_arr,
+            run_signals,
+            atr_arr,
+            fee_dec,
+            slip_dec,
+            capital,
+            fraction,
+            ann,
+            rf_per_bar,
+            0.0,
+            sig_indices_arr,
+            sl_mult_arr_,
+            tp_mult_arr_,
+            trail_mult_arr_,
+        )
 
         results = []
         for i, (name, params) in enumerate(expanded_combos):
             m = metrics_2d[i]
-            results.append(Result(
-                strategy=name, params=params,
-                total_return_pct=round(m[0], 2), sharpe_ratio=round(m[1], 3),
-                max_drawdown_pct=round(m[2], 2), win_rate_pct=round(m[3], 2),
-                num_trades=int(m[4]), profit_factor=round(m[5], 3),
-                sortino_ratio=round(m[6], 3), calmar_ratio=round(m[7], 3),
-            ))
+            results.append(
+                Result(
+                    strategy=name,
+                    params=params,
+                    total_return_pct=round(m[0], 2),
+                    sharpe_ratio=round(m[1], 3),
+                    max_drawdown_pct=round(m[2], 2),
+                    win_rate_pct=round(m[3], 2),
+                    num_trades=int(m[4]),
+                    profit_factor=round(m[5], 3),
+                    sortino_ratio=round(m[6], 3),
+                    calmar_ratio=round(m[7], 3),
+                )
+            )
     elif not use_managed:
         metrics_2d = backtest_batch(
-            close, high, low, open_arr, run_signals, fee_dec, slip_dec, capital, fraction, ann, rf_per_bar)
+            close,
+            high,
+            low,
+            open_arr,
+            run_signals,
+            fee_dec,
+            slip_dec,
+            capital,
+            fraction,
+            ann,
+            rf_per_bar,
+        )
         results = []
         for i, (name, params) in enumerate(run_combos):
             m = metrics_2d[i]
-            results.append(Result(
-                strategy=name, params=params,
-                total_return_pct=round(m[0], 2), sharpe_ratio=round(m[1], 3),
-                max_drawdown_pct=round(m[2], 2), win_rate_pct=round(m[3], 2),
-                num_trades=int(m[4]), profit_factor=round(m[5], 3),
-                sortino_ratio=round(m[6], 3), calmar_ratio=round(m[7], 3),
-            ))
+            results.append(
+                Result(
+                    strategy=name,
+                    params=params,
+                    total_return_pct=round(m[0], 2),
+                    sharpe_ratio=round(m[1], 3),
+                    max_drawdown_pct=round(m[2], 2),
+                    win_rate_pct=round(m[3], 2),
+                    num_trades=int(m[4]),
+                    profit_factor=round(m[5], 3),
+                    sortino_ratio=round(m[6], 3),
+                    calmar_ratio=round(m[7], 3),
+                )
+            )
     else:
         expanded_indices = []
         expanded_combos = []
@@ -1499,27 +1944,56 @@ def _run_batch(close, high, low, open_arr, signals_2d, combos, combo_strat, stra
             trail_arr[idx] = trail_v
 
         metrics_2d = backtest_batch_managed(
-            close, high, low, open_arr, run_signals, fee_dec, slip_dec,
-            capital, fraction, ann, rf_per_bar,
+            close,
+            high,
+            low,
+            open_arr,
+            run_signals,
+            fee_dec,
+            slip_dec,
+            capital,
+            fraction,
+            ann,
+            rf_per_bar,
             0.0,  # borrow_rate_per_bar (BUG-10 placeholder, set to 0 by default)
-            sig_indices, sl_arr, tp_arr, trail_arr)
+            sig_indices,
+            sl_arr,
+            tp_arr,
+            trail_arr,
+        )
 
         results = []
         for i, (name, params) in enumerate(expanded_combos):
             m = metrics_2d[i]
-            results.append(Result(
-                strategy=name, params=params,
-                total_return_pct=round(m[0], 2), sharpe_ratio=round(m[1], 3),
-                max_drawdown_pct=round(m[2], 2), win_rate_pct=round(m[3], 2),
-                num_trades=int(m[4]), profit_factor=round(m[5], 3),
-                sortino_ratio=round(m[6], 3), calmar_ratio=round(m[7], 3),
-            ))
+            results.append(
+                Result(
+                    strategy=name,
+                    params=params,
+                    total_return_pct=round(m[0], 2),
+                    sharpe_ratio=round(m[1], 3),
+                    max_drawdown_pct=round(m[2], 2),
+                    win_rate_pct=round(m[3], 2),
+                    num_trades=int(m[4]),
+                    profit_factor=round(m[5], 3),
+                    sortino_ratio=round(m[6], 3),
+                    calmar_ratio=round(m[7], 3),
+                )
+            )
 
     return results
 
 
-def run(strategies, df_or_data, fee=None, slippage=None, capital=None,
-        fraction=None, top=None, sort=None, timeframe="1h"):
+def run(
+    strategies,
+    df_or_data,
+    fee=None,
+    slippage=None,
+    capital=None,
+    fraction=None,
+    top=None,
+    sort=None,
+    timeframe="1h",
+):
     """Programmatic API — backtest strategies against data.
 
     Args:
@@ -1556,10 +2030,10 @@ def run(strategies, df_or_data, fee=None, slippage=None, capital=None,
     else:
         df = df_or_data
         data = {
-            "open":   df["open"].to_numpy().astype(np.float64),
-            "high":   df["high"].to_numpy().astype(np.float64),
-            "low":    df["low"].to_numpy().astype(np.float64),
-            "close":  df["close"].to_numpy().astype(np.float64),
+            "open": df["open"].to_numpy().astype(np.float64),
+            "high": df["high"].to_numpy().astype(np.float64),
+            "low": df["low"].to_numpy().astype(np.float64),
+            "close": df["close"].to_numpy().astype(np.float64),
             "volume": df["volume"].to_numpy().astype(np.float64),
         }
     # Ensure contiguous arrays for optimal Numba SIMD access
@@ -1634,9 +2108,18 @@ def run(strategies, df_or_data, fee=None, slippage=None, capital=None,
             np.ascontiguousarray(low[:split]),
             np.ascontiguousarray(open_arr[:split]),
             np.ascontiguousarray(signals_2d[:, :split]),
-            combos, combo_strat, strategies,
-            fee_dec, slip_dec, capital, fraction, ann, rf_per_bar, use_managed,
-            atr_arr=is_atr)
+            combos,
+            combo_strat,
+            strategies,
+            fee_dec,
+            slip_dec,
+            capital,
+            fraction,
+            ann,
+            rf_per_bar,
+            use_managed,
+            atr_arr=is_atr,
+        )
         train_top = rank_results(is_results, sort_by=sort)[:top]
 
         # Step 2 — OOS: regenerate signals for top-K IS winners, slice to [split:]
@@ -1664,15 +2147,21 @@ def run(strategies, df_or_data, fee=None, slippage=None, capital=None,
             np.ascontiguousarray(low[split:]),
             np.ascontiguousarray(open_arr[split:]),
             oos_sigs,
-            top_signal_params, top_combo_strat_idx, strategies,
-            fee_dec, slip_dec, capital, fraction, ann, rf_per_bar, use_managed,
-            atr_arr=oos_atr)
+            top_signal_params,
+            top_combo_strat_idx,
+            strategies,
+            fee_dec,
+            slip_dec,
+            capital,
+            fraction,
+            ann,
+            rf_per_bar,
+            use_managed,
+            atr_arr=oos_atr,
+        )
 
         # Match OOS results back to IS winners by full params — no re-ranking
-        oos_lookup = {
-            (r.strategy, tuple(sorted(r.params.items()))): r
-            for r in oos_results
-        }
+        oos_lookup = {(r.strategy, tuple(sorted(r.params.items()))): r for r in oos_results}
         test_top = []
         for r in train_top:
             key = (r.strategy, tuple(sorted(r.params.items())))
@@ -1690,16 +2179,29 @@ def run(strategies, df_or_data, fee=None, slippage=None, capital=None,
                 tr_end = split + k * step
                 if tr_end >= n_bars:
                     break
-                win_atr = np.ascontiguousarray(atr_arr_full[:tr_end]) if atr_arr_full is not None else None
+                win_atr = (
+                    np.ascontiguousarray(atr_arr_full[:tr_end])
+                    if atr_arr_full is not None
+                    else None
+                )
                 win_results = _run_batch(
                     np.ascontiguousarray(close[:tr_end]),
                     np.ascontiguousarray(high[:tr_end]),
                     np.ascontiguousarray(low[:tr_end]),
                     np.ascontiguousarray(open_arr[:tr_end]),
                     np.ascontiguousarray(signals_2d[:, :tr_end]),
-                    combos, combo_strat, strategies,
-                    fee_dec, slip_dec, capital, fraction, ann, rf_per_bar, use_managed,
-                    atr_arr=win_atr)
+                    combos,
+                    combo_strat,
+                    strategies,
+                    fee_dec,
+                    slip_dec,
+                    capital,
+                    fraction,
+                    ann,
+                    rf_per_bar,
+                    use_managed,
+                    atr_arr=win_atr,
+                )
                 win_ranked = rank_results(win_results, sort_by=sort)
                 if win_ranked:
                     best = win_ranked[0]
@@ -1713,11 +2215,23 @@ def run(strategies, df_or_data, fee=None, slippage=None, capital=None,
             np.ascontiguousarray(high[:split]),
             np.ascontiguousarray(low[:split]),
             np.ascontiguousarray(open_arr[:split]),
-            strat_lookup, data,
-            fee_dec, slip_dec, capital, fraction, ann, rf_per_bar,
-            use_managed, strategies, name_to_strat_idx, long_only,
+            strat_lookup,
+            data,
+            fee_dec,
+            slip_dec,
+            capital,
+            fraction,
+            ann,
+            rf_per_bar,
+            use_managed,
+            strategies,
+            name_to_strat_idx,
+            long_only,
             bar_offset=0,
-            atr_arr=np.ascontiguousarray(atr_arr_full[:split]) if atr_arr_full is not None else None)
+            atr_arr=np.ascontiguousarray(atr_arr_full[:split])
+            if atr_arr_full is not None
+            else None,
+        )
 
         _attach_equity_curves(
             test_top,
@@ -1725,11 +2239,23 @@ def run(strategies, df_or_data, fee=None, slippage=None, capital=None,
             np.ascontiguousarray(high[split:]),
             np.ascontiguousarray(low[split:]),
             np.ascontiguousarray(open_arr[split:]),
-            strat_lookup, data,
-            fee_dec, slip_dec, capital, fraction, ann, rf_per_bar,
-            use_managed, strategies, name_to_strat_idx, long_only,
+            strat_lookup,
+            data,
+            fee_dec,
+            slip_dec,
+            capital,
+            fraction,
+            ann,
+            rf_per_bar,
+            use_managed,
+            strategies,
+            name_to_strat_idx,
+            long_only,
             bar_offset=split,
-            atr_arr=np.ascontiguousarray(atr_arr_full[split:]) if atr_arr_full is not None else None)
+            atr_arr=np.ascontiguousarray(atr_arr_full[split:])
+            if atr_arr_full is not None
+            else None,
+        )
 
         # Step 5 — DSR
         deflated_sharpe_ratio(train_top, split)
@@ -1740,17 +2266,46 @@ def run(strategies, df_or_data, fee=None, slippage=None, capital=None,
 
     # Non-validate: run all combos at once
     all_results = _run_batch(
-        close, high, low, open_arr, signals_2d,
-        combos, combo_strat, strategies,
-        fee_dec, slip_dec, capital, fraction, ann, rf_per_bar, use_managed,
-        atr_arr=atr_arr_full)
+        close,
+        high,
+        low,
+        open_arr,
+        signals_2d,
+        combos,
+        combo_strat,
+        strategies,
+        fee_dec,
+        slip_dec,
+        capital,
+        fraction,
+        ann,
+        rf_per_bar,
+        use_managed,
+        atr_arr=atr_arr_full,
+    )
 
     ranked = rank_results(all_results, sort_by=sort)[:top]
     clear_sdk_cache()
-    _attach_equity_curves(ranked, close, high, low, open_arr, strat_lookup, data,
-                          fee_dec, slip_dec, capital, fraction, ann, rf_per_bar,
-                          use_managed, strategies, name_to_strat_idx, long_only,
-                          atr_arr=atr_arr_full)
+    _attach_equity_curves(
+        ranked,
+        close,
+        high,
+        low,
+        open_arr,
+        strat_lookup,
+        data,
+        fee_dec,
+        slip_dec,
+        capital,
+        fraction,
+        ann,
+        rf_per_bar,
+        use_managed,
+        strategies,
+        name_to_strat_idx,
+        long_only,
+        atr_arr=atr_arr_full,
+    )
     deflated_sharpe_ratio(ranked, n_bars)
     global _last_n_combos
     _last_n_combos = len(all_results)
@@ -1804,17 +2359,20 @@ def backtest(*strategies):
         elif args.end:
             date_desc = f" until {args.end}"
         limit_desc = f"{args.limit} " if not args.start else ""
-        print(f"\n[*] Fetching {limit_desc}{args.timeframe} candles for {args.symbol} from {args.exchange}{date_desc}...")
-        df = fetch_ohlcv(args.symbol, args.timeframe, args.exchange, args.limit,
-                         start=args.start, end=args.end)
+        print(
+            f"\n[*] Fetching {limit_desc}{args.timeframe} candles for {args.symbol} from {args.exchange}{date_desc}..."
+        )
+        df = fetch_ohlcv(
+            args.symbol, args.timeframe, args.exchange, args.limit, start=args.start, end=args.end
+        )
 
     print(f"    {len(df)} candles loaded in {time.perf_counter() - t0:.2f}s")
 
     data = {
-        "open":   df["open"].to_numpy().astype(np.float64),
-        "high":   df["high"].to_numpy().astype(np.float64),
-        "low":    df["low"].to_numpy().astype(np.float64),
-        "close":  df["close"].to_numpy().astype(np.float64),
+        "open": df["open"].to_numpy().astype(np.float64),
+        "high": df["high"].to_numpy().astype(np.float64),
+        "low": df["low"].to_numpy().astype(np.float64),
+        "close": df["close"].to_numpy().astype(np.float64),
         "volume": df["volume"].to_numpy().astype(np.float64),
     }
     close = np.ascontiguousarray(data["close"])
@@ -1857,8 +2415,7 @@ def backtest(*strategies):
 
         # OOS table with WFE column — IS rank order preserved, no OOS re-ranking
         is_return_lookup = {
-            (r.strategy, tuple(sorted(r.params.items()))): r.total_return_pct
-            for r in train_top
+            (r.strategy, tuple(sorted(r.params.items()))): r.total_return_pct for r in train_top
         }
         print(f"\n{'=' * 70}")
         print("  OUT-OF-SAMPLE (TEST) — IS RANK ORDER (no OOS re-ranking)")
@@ -1894,7 +2451,9 @@ def backtest(*strategies):
                     agree_count += 1
                 else:
                     marker = "<- changed"
-                print(f"    {tr_end} bars ({tr_end * 100 / n_bars:.0f}%): {params_str} -- Sharpe {sharpe:.3f}  {marker}")
+                print(
+                    f"    {tr_end} bars ({tr_end * 100 / n_bars:.0f}%): {params_str} -- Sharpe {sharpe:.3f}  {marker}"
+                )
             print(f"    Stability: {agree_count}/{len(stability)} windows agree with IS winner")
 
         # Best strategy summary
@@ -1909,17 +2468,26 @@ def backtest(*strategies):
             print(f"\n{'=' * 70}")
             print(f"  BEST STRATEGY: {best_is.strategy}")
             print(f"  Params: {best_is.params}")
-            print(f"  IS  Return: {best_is.total_return_pct:>+8.2f}% | Sharpe: {best_is.sharpe_ratio:.3f} | MaxDD: {best_is.max_drawdown_pct:.2f}%")
+            print(
+                f"  IS  Return: {best_is.total_return_pct:>+8.2f}% | Sharpe: {best_is.sharpe_ratio:.3f} | MaxDD: {best_is.max_drawdown_pct:.2f}%"
+            )
             if best_oos:
-                wfe_str = (f"{best_oos.total_return_pct / best_is.total_return_pct:.2f}x"
-                           if best_is.total_return_pct > 0.0 else "N/A")
-                print(f"  OOS Return: {best_oos.total_return_pct:>+8.2f}% | Sharpe: {best_oos.sharpe_ratio:.3f} | MaxDD: {best_oos.max_drawdown_pct:.2f}%  WFE: {wfe_str}")
+                wfe_str = (
+                    f"{best_oos.total_return_pct / best_is.total_return_pct:.2f}x"
+                    if best_is.total_return_pct > 0.0
+                    else "N/A"
+                )
+                print(
+                    f"  OOS Return: {best_oos.total_return_pct:>+8.2f}% | Sharpe: {best_oos.sharpe_ratio:.3f} | MaxDD: {best_oos.max_drawdown_pct:.2f}%  WFE: {wfe_str}"
+                )
 
         print(f"\n  IS bars: {split} | OOS bars: {n_bars - split}")
         print(f"  Full-period Buy & Hold: {buy_hold_pct:+.2f}%")
     else:
         total_combos = _last_n_combos
-        print(f"    Done in {elapsed:.4f}s ({total_combos / max(elapsed, 0.0001):.0f} backtests/sec)")
+        print(
+            f"    Done in {elapsed:.4f}s ({total_combos / max(elapsed, 0.0001):.0f} backtests/sec)"
+        )
 
         ranked = rank_results(results, sort_by=sort)
 
@@ -1943,8 +2511,12 @@ def backtest(*strategies):
         print(f"\n{'=' * 70}")
         print(f"  BEST STRATEGY: {best.strategy}")
         print(f"  Params: {best.params}")
-        print(f"  Return: {best.total_return_pct:+.2f}% | Sharpe: {best.sharpe_ratio:.3f} | MaxDD: {best.max_drawdown_pct:.2f}%")
-        print(f"  Win Rate: {best.win_rate_pct:.2f}% | Trades: {best.num_trades} | Profit Factor: {best.profit_factor:.3f}")
+        print(
+            f"  Return: {best.total_return_pct:+.2f}% | Sharpe: {best.sharpe_ratio:.3f} | MaxDD: {best.max_drawdown_pct:.2f}%"
+        )
+        print(
+            f"  Win Rate: {best.win_rate_pct:.2f}% | Trades: {best.num_trades} | Profit Factor: {best.profit_factor:.3f}"
+        )
 
         alpha = best.total_return_pct - buy_hold_pct
         print(f"\n  Buy & Hold: {buy_hold_pct:+.2f}%")
@@ -1960,6 +2532,7 @@ def backtest(*strategies):
 # ---------------------------------------------------------------------------
 # BUG-02: Probability Sharpe Ratio (PSR) and Deflated Sharpe Ratio (DSR)
 # ---------------------------------------------------------------------------
+
 
 def _norm_cdf(x: float) -> float:
     """Standard normal CDF via complementary error function."""
@@ -2013,8 +2586,9 @@ def deflated_sharpe_ratio(results: list, n_bars: int) -> None:
         return
     gamma = 0.5772156649  # Euler-Mascheroni constant
     # Expected maximum SR under H0 for n_trials independent strategies
-    e_max = ((1.0 - gamma) * _norm_cdf_inv(1.0 - 1.0 / n_trials) +
-             gamma * _norm_cdf_inv(1.0 - 1.0 / (n_trials * math.e)))
+    e_max = (1.0 - gamma) * _norm_cdf_inv(1.0 - 1.0 / n_trials) + gamma * _norm_cdf_inv(
+        1.0 - 1.0 / (n_trials * math.e)
+    )
     for r in results:
         sr = r.sharpe_ratio
         se = math.sqrt((1.0 + 0.5 * sr * sr) / (n_bars - 1))
@@ -2026,16 +2600,48 @@ def deflated_sharpe_ratio(results: list, n_bars: int) -> None:
 # ---------------------------------------------------------------------------
 
 __all__ = [
-    "Signal", "Strategy",
-    "backtest", "run", "clear_sdk_cache",
-    "compute_psr", "deflated_sharpe_ratio",
-    "ema_cross", "sma_cross", "dema_cross", "tema_cross",
-    "wma_cross", "kama_cross", "trima_cross",
-    "rsi", "cmo", "stoch_rsi", "cci", "willr", "mfi", "ultimate_osc",
-    "macd_signal", "apo", "ppo", "mom", "roc", "trix",
-    "adx", "adxr", "dx", "di_cross", "dm_cross",
-    "obv", "ad", "adosc",
-    "bollinger_bands", "atr_breakout", "natr_breakout", "channel_breakout",
-    "sar", "sar_ext",
-    "candlestick_pattern", "indicator", "custom",
+    "Signal",
+    "Strategy",
+    "backtest",
+    "run",
+    "clear_sdk_cache",
+    "compute_psr",
+    "deflated_sharpe_ratio",
+    "ema_cross",
+    "sma_cross",
+    "dema_cross",
+    "tema_cross",
+    "wma_cross",
+    "kama_cross",
+    "trima_cross",
+    "rsi",
+    "cmo",
+    "stoch_rsi",
+    "cci",
+    "willr",
+    "mfi",
+    "ultimate_osc",
+    "macd_signal",
+    "apo",
+    "ppo",
+    "mom",
+    "roc",
+    "trix",
+    "adx",
+    "adxr",
+    "dx",
+    "di_cross",
+    "dm_cross",
+    "obv",
+    "ad",
+    "adosc",
+    "bollinger_bands",
+    "atr_breakout",
+    "natr_breakout",
+    "channel_breakout",
+    "sar",
+    "sar_ext",
+    "candlestick_pattern",
+    "indicator",
+    "custom",
 ]
