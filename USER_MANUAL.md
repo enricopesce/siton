@@ -9,17 +9,24 @@
 2. [Installation](#2-installation)
 3. [Quick Start](#3-quick-start)
 4. [Core Concepts](#4-core-concepts)
+   - [4.6 Spot vs. Derivatives Markets](#46-spot-vs-derivatives-markets)
 5. [Signal Constructors Reference](#5-signal-constructors-reference)
 6. [Signal Composition Operators](#6-signal-composition-operators)
 7. [The Strategy Class](#7-the-strategy-class)
+   - [7.3 long_only Mode](#73-long_only-mode)
 8. [Position Management](#8-position-management)
+   - [8.4 Position Sizing Decision Tree](#84-position-sizing-decision-tree)
+   - [8.5 Capital and Compounding](#85-capital-and-compounding)
 9. [Data Sources](#9-data-sources)
 10. [Running a Backtest](#10-running-a-backtest)
 11. [Reading the Results](#11-reading-the-results)
-12. [Walk-Forward Validation](#12-walk-forward-validation)
+12. [Purged K-Fold Cross-Validation](#12-purged-k-fold-cross-validation)
 13. [Strategy Patterns Cookbook](#13-strategy-patterns-cookbook)
 14. [Grid Sizing Guide](#14-grid-sizing-guide)
 15. [Common Pitfalls](#15-common-pitfalls)
+16. [Execution Costs and Realistic Backtesting](#16-execution-costs-and-realistic-backtesting)
+17. [Performance Metrics Deep Dive](#17-performance-metrics-deep-dive)
+18. [Multi-Strategy Runs and Capital Allocation](#18-multi-strategy-runs-and-capital-allocation)
 
 ---
 
@@ -176,6 +183,68 @@ Signal from close[i-1]  →  execute at open[i]  →  mark-to-market at close[i]
 
 Intrabar stops (stop-loss, take-profit, trailing stop) use `high[i]` / `low[i]`
 of the entry/holding bar to detect breaches.
+
+### 4.6 Spot vs. Derivatives Markets
+
+The two most common crypto trading contexts require different strategy designs.
+
+#### Spot markets (buy / sell only)
+
+You purchase the actual underlying asset. You can only **profit from price increases**
+(long positions). When you want to exit, you sell what you hold. Shorting is not
+available without an external lending mechanism.
+
+**Examples:** Binance Spot, Coinbase, Kraken Spot.
+
+**Siton setting:** always add `long_only=True` to your `Strategy`. This causes all
+`-1` (short) signals to be treated as `0` (flat) before any position is opened.
+
+```python
+STRATEGY = Strategy("SpotOnly", signal=my_signal, long_only=True)
+```
+
+#### Derivatives markets (long + short)
+
+A perpetual futures contract tracks the spot price but lets you take either side
+with leverage. You can:
+
+- **Go long (+1)** — profit from rising prices.
+- **Go short (-1)** — profit from falling prices by borrowing the asset.
+
+Siton backtests both directions by default (no flag needed).
+
+**Examples:** Binance Futures (BTCUSDT perpetual), Bybit, OKX.
+
+**Default Siton behavior** (`long_only=False`): both `+1` and `-1` signals are
+executed. This is correct for derivatives accounts.
+
+#### Side-by-side summary
+
+| | Spot | Derivatives |
+|---|---|---|
+| Long (+1 signal) | Yes — buy the asset | Yes — open long contract |
+| Short (-1 signal) | **No** — signal ignored | Yes — open short contract |
+| Siton flag | `long_only=True` | (default, no flag needed) |
+| Benchmark | Buy & Hold is fair comparison | Buy & Hold is only a partial comparison |
+| Stops / TP | Same mechanics | Same mechanics |
+
+#### How long_only affects your backtest
+
+Setting `long_only=True` silently converts every `-1` signal to `0` before
+processing. Practical effects:
+
+- **Trade count roughly halves** — only bullish setups fire.
+- **Returns in a bull market often improve** — short trades that would have lost
+  money are removed.
+- **Returns in a bear market often suffer** — profitable short trades are dropped.
+- Always compare both modes before deciding which matches your deployment account.
+
+```python
+# Run both to compare before deploying
+STRATEGY_SPOT   = Strategy("SpotVersion",  signal=signal, long_only=True,  top=5)
+STRATEGY_FUTURES = Strategy("FuturesVersion", signal=signal, long_only=False, top=5)
+STRATEGY = [STRATEGY_SPOT, STRATEGY_FUTURES]
+```
 
 ---
 
@@ -882,10 +951,11 @@ Strategy(
     sort="sharpe_ratio",# metric to rank by
     long_only=False,    # ignore short signals (useful for spot crypto)
     risk_free_rate=0.0, # annualized risk-free rate for Sharpe/Sortino
-    # Walk-forward validation
-    validate=False,
-    train_ratio=0.7,
-    n_splits=5,
+    # Purged K-fold cross-validation (see Section 12)
+    cv=False,
+    cv_folds=5,
+    purge_bars=50,
+    n_splits=5,         # stability check windows within last fold
 )
 ```
 
@@ -926,6 +996,49 @@ STRATEGY = Strategy("SpotBTC", signal=my_signal, long_only=True)
 ```
 
 Short signals (`-1`) are suppressed; only long positions are taken.
+
+**What happens to each signal value:**
+
+| Signal | `long_only=False` (default) | `long_only=True` (spot) |
+|--------|-----------------------------|--------------------------|
+| `+1` (long) | Open long position | Open long position |
+| `-1` (short) | Open short position | **Treated as flat (0)** |
+| `0` (flat) | No position | No position |
+
+**Designing for spot markets:** when you know your strategy will run on a spot
+account, bias your indicators toward capturing bullish moves rather than
+symmetric long/short setups:
+
+- **Prefer oscillators in oversold mode** — e.g. `rsi()` fires `+1` when
+  oversold (buy the dip); that long signal is useful on spot.
+- **Use `~rsi()` as a filter** — avoids entering longs when overbought rather
+  than entering shorts.
+- **Mean-reversion strategies suit spot well** — they go long on dips and exit
+  on recovery; no shorts needed.
+- **Trend strategies work too** — just accept that the short leg will be flat,
+  meaning you sit in cash during downtrends rather than profiting from them.
+
+**Comparing spot vs. futures performance for the same strategy:**
+
+```python
+from siton.sdk import ema_cross, adx, Strategy, backtest
+
+signal = ema_cross(fast=[8, 12], slow=[26, 50]).filter_by(
+    adx(periods=[14], thresholds=[25])
+)
+
+# Run both in one command to see the difference
+STRATEGY = [
+    Strategy("Spot_LongOnly",    signal=signal, long_only=True,  top=5),
+    Strategy("Futures_LongShort", signal=signal, long_only=False, top=5),
+]
+
+if __name__ == "__main__":
+    backtest(STRATEGY)
+```
+
+The output shows both variants side by side so you can see how much value the
+short leg adds (or subtracts) on your chosen asset and timeframe.
 
 ---
 
@@ -1016,6 +1129,79 @@ trade_value = $10,000 × 1% / 4% = $2,500
 loss if stopped = $2,500 × 4% = $100 = 1% of capital ✓
 ```
 
+### 8.4 Position Sizing Decision Tree
+
+Use this flowchart to pick the right sizing approach for your strategy:
+
+```
+Do you use stop_loss or atr_stop_mult?
+│
+├── NO  → Use fraction= only.
+│         Default fraction=1.0 deploys 100% of equity each trade.
+│         Lower it (e.g. fraction=0.5) to reduce per-trade exposure.
+│
+└── YES → Do you want constant dollar risk per stop-out?
+          │
+          ├── NO  → fraction= only (wider stops risk more equity per trade)
+          │
+          └── YES → Add risk_per_trade=0.01 (1%) or similar.
+                    Position size is calculated as:
+                      trade_value = equity × risk_per_trade / stop_distance
+                    fraction= acts as a leverage cap:
+                      trade_value is capped at equity × fraction
+```
+
+**Practical sizing examples (equity = $10,000):**
+
+| `fraction` | `risk_per_trade` | `stop_loss` | Trade size | Max loss |
+|-----------|-----------------|------------|-----------|---------|
+| 1.0 | — | — | $10,000 | unlimited (no stop) |
+| 1.0 | — | 2.0% | $10,000 | $200 (2% of equity) |
+| 1.0 | 1.0% | 2.0% | $5,000 | $100 (1% of equity) |
+| 1.0 | 1.0% | 0.5% | $10,000 (capped) | $50 (0.5% of equity) |
+| 0.5 | — | — | $5,000 | unlimited |
+
+**Rule of thumb:**
+- `fraction=1.0` (full equity) with `risk_per_trade=0.01` and `atr_stop_mult` is the
+  most disciplined setup: risk is fixed in dollar terms, size adapts to volatility.
+- Never set `risk_per_trade` without a stop — the formula divides by stop distance,
+  which is undefined without a stop.
+
+### 8.5 Capital and Compounding
+
+Siton tracks a realistic equity curve: each trade's P&L updates the cash balance,
+and the next trade sizes off that updated balance. This is **full compounding**.
+
+```python
+capital=10000.0  # starting equity; all sizing is relative to current equity
+fraction=1.0     # fraction of *current* equity deployed — grows with wins, shrinks with losses
+```
+
+**Implications of compounding:**
+
+- A 50% loss requires a 100% gain to recover — drawdown is asymmetric.
+- With `fraction=1.0` and no stops, a single catastrophic bar can wipe equity to zero
+  (margin call on a short, or gap through stop on a long).
+- `risk_per_trade` + stop is the strongest protection: losses are bounded in
+  fractional equity terms, so recovery is feasible even after a string of losses.
+
+**Setting `capital=` for realistic cost simulation:**
+
+The `capital=` value affects the absolute dollar P&L shown in logs but **not**
+percentage-based metrics (return%, Sharpe, etc.), which are capital-neutral.
+Set it to your intended real-money amount to see realistic fee drag:
+
+```python
+# Binance spot with realistic capital
+STRATEGY = Strategy(
+    "MyStrat",
+    signal=signal,
+    capital=50000.0,   # $50k starting capital
+    fee=0.075,         # 0.075% taker fee (Binance standard)
+    slippage=0.05,     # 0.05% slippage (liquid pair)
+)
+```
+
 ---
 
 ## 9. Data Sources
@@ -1096,9 +1282,10 @@ Data source (pick one):
   --end   YYYY-MM-DD    End date (inclusive)
   -t, --timeframe TF    Candle size (default: 1h)
 
-Validation:
-  --validate            Enable walk-forward validation
-  --train-ratio FLOAT   IS/OOS split (default: 0.7 = 70% train)
+Cross-validation:
+  --cv                  Enable purged K-fold cross-validation
+  --cv-folds N          Number of folds (default: 5)
+  --purge-bars N        Bars to remove at train/test boundary (default: 50)
 ```
 
 ### 10.2 The STRATEGY Variable
@@ -1121,11 +1308,14 @@ from siton.sdk import run
 from siton.engine import rank_results
 
 results = run([STRATEGY], data, timeframe="1h")
+# results is list[Result] when cv=False (default)
 ranked = rank_results(results, sort_by="sharpe_ratio")
 
 for r in ranked[:5]:
     print(f"{r.strategy}: return={r.total_return_pct:+.2f}%, sharpe={r.sharpe_ratio:.3f}")
     print(f"  params: {r.params}")
+
+# results is dict{"folds", "aggregated", "cv_folds", "purge_bars", "stability"} when cv=True
 ```
 
 The `Result` dataclass fields:
@@ -1143,6 +1333,7 @@ The `Result` dataclass fields:
 | `sortino_ratio` | float | Downside-deviation Sharpe |
 | `calmar_ratio` | float | Return / max drawdown |
 | `psr` | float | Probabilistic Sharpe Ratio |
+| `cv_consistency` | float | Fraction of CV folds with positive OOS Sharpe (0.0 when not using CV) |
 | `equity_curve` | ndarray | Per-bar equity (if attached) |
 
 ---
@@ -1187,35 +1378,129 @@ on a trending asset does not justify the complexity or risk.
 
 ---
 
-## 12. Walk-Forward Validation
+## 12. Purged K-Fold Cross-Validation
 
-Walk-forward validation splits the data into an in-sample (IS) training period
-and an out-of-sample (OOS) test period, helping detect overfitting.
+Walk-forward validation gives one OOS estimate, which is noisy. Purged K-fold CV
+(López de Prado, *Advances in Financial Machine Learning*) repeats the evaluation
+across **K non-overlapping OOS folds**, using an anchored expanding training window
+for each, and aggregates the results for a more statistically robust ranking.
 
-```bash
-siton my_strategy.py -s BTC/USDT -t 4h --start 2022-01-01 --end 2024-12-31 --validate --train-ratio 0.7
+#### What "purged" means
+
+Indicator warm-up periods cause the last few bars of any training window to be
+contaminated by data from the upcoming test window. A **purge gap** removes
+`purge_bars` bars from the end of each training window before fitting, eliminating
+this look-ahead bias at the boundary.
+
+```
+Full dataset (n bars)
+├── Fold 1:  train=[0 : fold_size - purge_bars]   test=[fold_size : 2×fold_size]
+├── Fold 2:  train=[0 : 2×fold_size - purge_bars]  test=[2×fold_size : 3×fold_size]
+└── Fold 3:  train=[0 : 3×fold_size - purge_bars]  test=[3×fold_size : end]
+             └── purge gap ──┘  ← contaminated bars removed
 ```
 
-This uses 70% of bars for optimization and 30% for out-of-sample testing.
+Training always starts from bar 0 (anchored expanding) to respect temporal order
+and maximize the training set available at each fold.
 
-The output adds two extra columns:
+#### Enabling CV
 
-- **PSR** (Probabilistic Sharpe Ratio): probability that the true Sharpe is
-  positive. Values > 0.95 are strong.
-- **WFE** (Walk-Forward Efficiency): OOS return / IS return. Values > 0.5 suggest
-  the strategy is generalizing well.
+```python
+STRATEGY = Strategy(
+    "TrendFollowing",
+    signal=ema_cross(fast=[8, 12], slow=[26, 50]) & adx(periods=[14], thresholds=[25]),
+    cv=True,         # enable purged K-fold CV
+    cv_folds=5,      # number of folds (fold 0 always skipped — no prior training data)
+    purge_bars=50,   # bars removed at each train/test boundary
+    top=5,
+)
+```
 
-The **parameter stability table** shows the top-1 parameter set across expanding
-IS windows. Consistent parameters across windows are a strong sign of robustness.
+```bash
+# CLI flags override Strategy defaults
+siton examples/07_purged_kfold_cv.py --demo --cv --cv-folds 5 --purge-bars 50
+```
 
-### Interpreting IS/OOS results
+#### Output format
 
-| Scenario | Interpretation |
-|----------|---------------|
-| Strong IS, strong OOS | Robust strategy |
-| Strong IS, flat/negative OOS | Overfitted to training period |
-| Moderate IS, moderate OOS | Possibly generalizable |
-| Params change each window | Unstable, likely random pattern mining |
+```
+======================================================================
+  PURGED K-FOLD CV — 5 FOLDS, PURGE=50 BARS
+======================================================================
+  AGGREGATED OOS (sorted by sharpe_ratio)
+======================================================================
+  #  Strategy              Return%   Sharpe   MaxDD%  WinRate%  Trades     PF    PSR  Cons  Params
+  1  TrendFollowing        +12.3%    1.234    -8.45%   63.2%      89    1.567  0.872   4/3  ema_fast=8, ...
+
+  FOLD DETAILS
+  Fold 1: train=[0:950]  test=[1000:2000]
+    IS top-1: ema_fast=8, ema_slow=26 | Sharpe=1.452
+    OOS best: ema_fast=8, ema_slow=26 | Return=+8.34%  Sharpe=1.120
+  ...
+```
+
+The **Cons** (consistency) column shows `n_positive_folds / n_folds_run` — the
+fraction of OOS windows in which the combo produced a positive Sharpe ratio.
+
+#### The `cv_consistency` metric
+
+```python
+results = run(STRATEGY, df)
+for r in results["aggregated"]:
+    n = len(results["folds"])
+    print(f"Consistency: {int(r.cv_consistency * n)}/{n}  Sharpe: {r.sharpe_ratio:.3f}")
+```
+
+| Consistency | Interpretation |
+|-------------|----------------|
+| K/K (e.g. 3/3) | Profitable in every fold — strongest robustness signal |
+| (K−1)/K | One bad fold — acceptable; check if it was an anomalous period |
+| < 50% | More losing folds than winning — likely overfitted; discard |
+
+#### Programmatic API
+
+```python
+from siton.sdk import ema_cross, adx, Strategy, run
+from siton.data import generate_sample
+
+df = generate_sample(n=5000)
+strat = Strategy(
+    "Test",
+    signal=ema_cross(fast=[8, 12], slow=[26, 50]),
+    cv=True, cv_folds=5, purge_bars=50,
+)
+results = run(strat, df)
+
+print(results.keys())
+# dict_keys(['folds', 'aggregated', 'cv_folds', 'purge_bars'])
+
+# Aggregated OOS ranking — mean metrics across all folds
+for r in results["aggregated"]:
+    n = len(results["folds"])
+    print(f"{r.params}  sharpe={r.sharpe_ratio:.3f}  consistency={int(r.cv_consistency*n)}/{n}")
+
+# Per-fold detail (IS top-K and OOS results for each fold)
+for fd in results["folds"]:
+    print(f"Fold {fd['fold']}: train={fd['train_range']}  test={fd['test_range']}")
+    print(f"  IS top-1: {fd['train_top'][0].params}")
+```
+
+#### Choosing `cv_folds` and `purge_bars`
+
+| Dataset size | Recommended `cv_folds` | Recommended `purge_bars` |
+|---|---|---|
+| < 2,000 bars | 3 | 20 |
+| 2,000 – 10,000 bars | 5 | 50 |
+| > 10,000 bars | 5 – 10 | 100 |
+
+- **`purge_bars`** should be at least as large as the longest indicator lookback
+  in your signal. For a 200-period SMA use `purge_bars=200`.
+- **`cv_folds`** controls the trade-off between fold count and fold length.
+  With 5,000 bars and 5 folds, each OOS window is 1,000 bars. Fewer folds give
+  longer (more reliable) OOS windows; more folds give more diverse estimates.
+- Fold 0 is always skipped — no prior data to train on — so `cv_folds=5`
+  produces at most 4 OOS estimates (fewer if early folds don't have enough
+  training data after the purge).
 
 ---
 
@@ -1389,7 +1674,109 @@ Fires long only when at least 2 of 3 indicators are bullish.
 
 ---
 
-### Pattern 8: ATR-Based Stops for Cross-Asset Robustness
+### Pattern 8: Spot Market Long-Only Strategy
+
+Optimized for buying and holding crypto on a spot exchange — no shorting.
+The strategy holds cash during downtrends rather than going short.
+
+```python
+from siton.sdk import ema_cross, rsi, obv, adx, Strategy, backtest
+
+# Trend signal: bullish when fast EMA > slow EMA
+trend = ema_cross(fast=[8, 12, 21], slow=[50, 100, 200])
+
+# Only enter longs when RSI is not yet overbought (avoid buying tops)
+rsi_not_extreme = ~rsi(periods=[14], oversold=[30], overbought=[65, 70])
+
+# Volume confirming accumulation
+vol_confirm = obv(ma_periods=[20, 50])
+
+# Trending regime (avoid ranging markets)
+in_trend = adx(periods=[14], thresholds=[20, 25])
+
+signal = (
+    trend
+    .filter_by(rsi_not_extreme)   # don't chase overbought moves
+    .filter_by(vol_confirm)        # require volume backing
+    .filter_by(in_trend)           # only in trend mode
+)
+
+STRATEGY = Strategy(
+    "SpotBTC_LongOnly",
+    signal=signal,
+    long_only=True,         # spot account — no shorting
+    atr_period=14,
+    atr_stop_mult=[1.5, 2.0, 2.5],
+    atr_tp_mult=[3.0, 5.0, 8.0],
+    risk_per_trade=0.01,    # risk 1% of equity per stop-out
+    top=10,
+    sort="sharpe_ratio",
+)
+
+if __name__ == "__main__":
+    backtest(STRATEGY)
+```
+
+Key properties of this design:
+- Sits in **cash** during downtrends and ranging markets (no exposure, no loss).
+- Enters longs only when three independent conditions agree.
+- ATR stops adapt to asset volatility automatically.
+- `risk_per_trade=0.01` keeps each stop-out at exactly 1% of equity.
+
+---
+
+### Pattern 9: Derivatives Long + Short (Perpetual Futures)
+
+On a perpetual futures exchange you can profit from both rising and falling prices.
+This strategy is designed to capture both directions.
+
+```python
+from siton.sdk import ema_cross, macd_signal, adx, rsi, Strategy, backtest
+
+# Base trend: long when fast > slow, short when fast < slow
+trend = ema_cross(fast=[8, 12], slow=[50, 100])
+
+# Require MACD to agree directionally for both longs and shorts
+momentum = macd_signal(fast=[12], slow=[26], signal_period=[9])
+
+# Gate: only trade when ADX confirms a trend is present
+trending = adx(periods=[14], thresholds=[20, 25])
+
+# Block entries at RSI extremes (avoid chasing overbought longs / oversold shorts)
+rsi_neutral = ~rsi(periods=[14], oversold=[25, 30], overbought=[70, 75])
+
+signal = (
+    (trend & momentum)              # trend + momentum must agree on direction
+    .filter_by(trending)            # only in trending regimes
+    .filter_by(rsi_neutral)         # block RSI extremes
+)
+
+STRATEGY = Strategy(
+    "Futures_LongShort",
+    signal=signal,
+    # long_only=False is the default — both +1 and -1 signals fire
+    atr_period=14,
+    atr_stop_mult=[1.5, 2.0, 3.0],
+    atr_tp_mult=[3.0, 5.0, 8.0],
+    risk_per_trade=0.01,
+    top=10,
+    sort="sharpe_ratio",
+)
+
+if __name__ == "__main__":
+    backtest(STRATEGY)
+```
+
+This fires short positions during confirmed downtrends, which can significantly
+improve performance during bear markets compared to a long-only equivalent.
+
+> **Deployment note:** Make sure your live account type matches your backtest.
+> Running this strategy on a spot account will skip all short signals at runtime,
+> producing results that diverge from the backtest.
+
+---
+
+### Pattern 10: ATR-Based Stops for Cross-Asset Robustness
 
 ```python
 from siton.sdk import ema_cross, adx, Strategy, backtest
@@ -1525,13 +1912,17 @@ If your top results all have very few trades, your signal is too selective:
 Every parameter combination you search is a potential overfitting degree of
 freedom. To guard against it:
 
-1. **Run `--validate`** on every promising strategy before trusting results.
-2. **Check the parameter stability table**: stable params across IS windows
+1. **Run `--cv`** on every promising strategy before trusting results — K
+   independent OOS estimates are far more reliable than a single in-sample run
+   (see Section 12).
+2. **Check `cv_consistency`**: a combo that is profitable in < 50% of folds
+   should be discarded regardless of average Sharpe.
+3. **Check the parameter stability table**: stable params across IS windows
    are a strong robustness signal.
-3. **Limit grid diversity**: fewer parameters, wider spacing.
-4. **Fix known-good values**: use literature defaults (ADX=25, RSI 30/70)
+4. **Limit grid diversity**: fewer parameters, wider spacing.
+5. **Fix known-good values**: use literature defaults (ADX=25, RSI 30/70)
    before widening the search.
-5. **Check OOS Sharpe > 0**: a strategy that profits in-sample but loses
+6. **Check OOS Sharpe > 0**: a strategy that profits in-sample but loses
    out-of-sample is pure curve-fitting.
 
 ### 15.7 Not enough data
@@ -1544,12 +1935,494 @@ Rule of thumb: `data_length > 3 × max_indicator_period + desired_trade_count ×
 
 Fetch at least 3,000–5,000 candles for meaningful results.
 
-### 15.8 Grid collision renaming
+### 15.8 Spot vs. Derivatives Mismatch
+
+A backtest that runs in full long+short mode (`long_only=False`, the default)
+will not match what happens live on a spot account, because a spot account
+cannot execute short positions.
+
+**Symptom:** Backtest shows strong performance, but live spot account only
+captures roughly half the trades and diverges from the equity curve.
+
+**Root cause:** Short signals (`-1`) fire in the backtest but are silently
+skipped on spot, creating a structural mismatch.
+
+**Fix:**
+
+```python
+# WRONG for a spot account: backtests short legs that will never execute live
+STRATEGY = Strategy("WrongForSpot", signal=my_signal)
+
+# CORRECT for a spot account: backtest matches live behavior
+STRATEGY = Strategy("CorrectForSpot", signal=my_signal, long_only=True)
+```
+
+**Checklist before live deployment:**
+
+| Question | Spot account answer | Futures account answer |
+|----------|--------------------|-----------------------|
+| Can you short? | No | Yes |
+| Set `long_only=`? | `True` | `False` (default) |
+| Short signals in backtest? | Must be absent | Expected |
+| Right benchmark? | Buy & Hold | Optional (B&H is one-sided) |
+
+### 15.9 Grid collision renaming
 
 When two composed signals have the same parameter name (e.g., both use `adx`),
 the second signal's keys are automatically renamed with a numeric suffix
 (`adx_period_2`, `adx_threshold_2`). This is expected behavior — the output
 table will show both.
+
+---
+
+## 16. Execution Costs and Realistic Backtesting
+
+Every live trade incurs two categories of friction: fees charged by the exchange
+and market impact (slippage). Siton models both in every backtest.
+
+### 16.1 Trading Fees
+
+```python
+Strategy("MyStrat", signal=signal, fee=0.075)   # 0.075% taker fee
+```
+
+`fee` is expressed as a **percentage** (not a fraction). It is deducted on both
+the entry fill and the exit fill of every trade.
+
+**Fee is applied to both legs:**
+
+```
+Entry:  you spend exactly trade_value cash; shares received = trade_value / (fill × (1 + fee/100))
+Exit:   you receive shares × fill × (1 - fee/100)
+```
+
+This matches exchange behavior: the exchange keeps a percentage of every transaction.
+
+**Default:** `fee=0.075` (0.075% = Binance standard taker rate, BNB discount not applied).
+
+**Reference fees by context:**
+
+| Exchange / Context | Typical taker fee | Siton `fee=` |
+|-------------------|------------------|-------------|
+| Binance Spot (standard) | 0.10% | `0.10` |
+| Binance Spot (BNB discount) | 0.075% | `0.075` (default) |
+| Binance Futures (standard) | 0.05% | `0.05` |
+| Coinbase Advanced | 0.06–0.08% | `0.06` to `0.08` |
+| Kraken Pro | 0.10–0.26% | `0.10` to `0.26` |
+| OKX Futures | 0.02–0.05% | `0.02` to `0.05` |
+| Hypothetical zero-fee | — | `fee=0.0` |
+
+**Fee drag on frequent trading:**
+
+A round-trip (entry + exit) costs `2 × fee`. At 0.075%:
+
+```
+Round-trip cost = 2 × 0.075% = 0.15% per trade
+100 trades/year → 15% return consumed by fees alone
+```
+
+This is why strategies with many small trades (`num_trades > 500` per year) rarely
+survive realistic fee modeling. Always set `fee=` to match your actual exchange.
+
+### 16.2 Slippage Model
+
+```python
+Strategy("MyStrat", signal=signal, slippage=0.05)   # 0.05% slippage
+```
+
+`slippage` models market impact: the fill price is **worse than the bar open** due
+to order book depth, bid-ask spread, and latency.
+
+**How slippage is applied:**
+
+```
+Buy fill  = open[i] × (1 + slippage/100)   ← you pay more than the open
+Sell fill = open[i] × (1 - slippage/100)   ← you receive less than the open
+```
+
+This is a simple but conservative model. A `slippage=0.05` (0.05%) means your fills
+are 0.05% worse than the theoretical open price in each direction.
+
+**Choosing a slippage value:**
+
+| Pair / Liquidity | Realistic slippage | `slippage=` |
+|-----------------|-------------------|-------------|
+| BTC/USDT, ETH/USDT (top exchanges) | 0.01–0.05% | `0.02` to `0.05` |
+| Mid-cap coins (SOL, BNB) | 0.05–0.10% | `0.05` to `0.10` |
+| Small-cap / low liquidity | 0.2–1.0%+ | `0.20` to `1.0` |
+| Conservative worst-case | — | `0.10` |
+
+**Default:** `slippage=0.05`. This is reasonable for major pairs but may be too
+optimistic for small-cap assets — adjust accordingly.
+
+### 16.3 The Full Round-Trip Cost Model
+
+Every completed trade consumes:
+
+```
+round_trip_cost = 2 × fee + 2 × slippage   (both in %)
+```
+
+With defaults (`fee=0.075, slippage=0.05`):
+
+```
+round_trip = 2 × 0.075% + 2 × 0.05% = 0.25% per round trip
+```
+
+A strategy must generate more than 0.25% per trade just to break even.
+
+**Stress-testing with realistic costs:**
+
+```python
+# Conservative — assumes higher fees and worse fills
+STRATEGY_CONSERVATIVE = Strategy(
+    "ConservativeTest",
+    signal=signal,
+    fee=0.10,        # higher fee tier
+    slippage=0.10,   # 0.10% slippage (wider spread / less liquid)
+    top=5,
+)
+
+# Optimistic — best-case fee + ultra-liquid pair
+STRATEGY_OPTIMISTIC = Strategy(
+    "OptimisticTest",
+    signal=signal,
+    fee=0.02,        # VIP tier or maker rebate scenario
+    slippage=0.02,
+    top=5,
+)
+
+# Compare both to see how robust the strategy is to cost assumptions
+STRATEGY = [STRATEGY_CONSERVATIVE, STRATEGY_OPTIMISTIC]
+```
+
+A strategy that survives the conservative scenario is likely to hold up in live trading.
+
+### 16.4 Stop Exits and Re-entry Costs
+
+When a stop fires intrabar, the engine closes the position at the stop price and
+immediately re-enters (at the close price) if the signal is still active.
+**Each stop-out counts as two trades** (close + reopen), so excessive stops
+generate extra fee drag.
+
+```
+Stop fires → exit at stop price (with slippage + fee)
+           → signal still active → re-enter at close[i] (with slippage + fee)
+Total cost  = 2 more fills on top of the normal round-trip
+```
+
+This is one reason aggressive trailing stops can hurt performance on noisy assets:
+they generate many stop-outs and re-entries, each consuming fees.
+
+### 16.5 Short Selling Costs (Borrow Rate)
+
+Shorting on derivatives (perpetual futures) incurs a **funding rate** or borrow cost
+paid periodically to the long side. The engine models this as `borrow_rate_per_bar`,
+which is currently set to `0.0` (disabled) in all backtests.
+
+This means **short-side backtests are optimistic** for funding-rate-heavy periods
+(e.g., strong bull markets where funding rates can reach 0.1%/8h = ~110% annualized).
+
+For conservative futures backtesting, account for this manually when interpreting
+short-side returns by subtracting an estimated annual borrow cost from the OOS result.
+
+---
+
+## 17. Performance Metrics Deep Dive
+
+Siton computes eight metrics for every parameter combination. This section explains
+what each one measures, how it is computed, and when to use it for ranking.
+
+### 17.1 Sharpe Ratio
+
+**Formula:**
+
+```
+Sharpe = mean(excess_returns) / std(excess_returns) × √(bars_per_year)
+excess_return[i] = bar_return[i] - risk_free_rate_per_bar
+```
+
+**Key properties:**
+- Only active bars (position open) contribute to the mean and variance — flat periods
+  do not penalize the ratio for being in cash.
+- Uses **sample standard deviation** (divides by N−1), which is the statistically
+  correct estimator for finite series.
+- Annualized via `√(bars_per_year)` where the annualization factor is derived from
+  the timeframe (e.g., `√8760` for 1h, `√365` for 1d).
+
+**Interpretation:**
+
+| Sharpe | Meaning |
+|--------|---------|
+| > 2.0 | Exceptional — verify it is not overfitted |
+| 1.0 – 2.0 | Good — worth investigating further |
+| 0.5 – 1.0 | Mediocre — may improve with better risk management |
+| < 0.5 | Poor — likely not profitable after costs in live trading |
+
+**Setting `risk_free_rate`:**
+
+```python
+# US Treasury rate (~5% in 2024), annualized
+STRATEGY = Strategy("MyStrat", signal=signal, risk_free_rate=0.05)
+```
+
+Default is `0.0`. Raising it lowers every Sharpe ratio but makes comparisons
+more rigorous: a strategy should beat the risk-free rate to justify the risk.
+
+### 17.2 Sortino Ratio
+
+Like Sharpe, but uses **downside deviation** (standard deviation of negative
+bar returns only) instead of total deviation. Strategies that have smooth upswings
+but sharp occasional losses are penalized more by Sortino than by Sharpe.
+
+```
+Sortino = mean(excess_returns) / downside_std(excess_returns) × √(bars_per_year)
+```
+
+Sortino is always ≥ Sharpe (because downside_std ≤ total_std). A strategy with
+Sharpe 1.5 but Sortino 1.2 has significant left-tail risk. A strategy with
+Sharpe 1.5 and Sortino 2.0 has mostly upside variance — a positive trait.
+
+**When to prefer Sortino:** when evaluating strategies with frequent small wins and
+occasional large losses (e.g., mean-reversion strategies that can catch flash crashes).
+
+### 17.3 Calmar Ratio
+
+```
+Calmar = annualized_CAGR / |max_drawdown_pct|
+```
+
+Measures return per unit of worst historical drawdown. A Calmar of 1.0 means
+you earned your max drawdown back in one year.
+
+| Calmar | Meaning |
+|--------|---------|
+| > 3.0 | Excellent capital efficiency |
+| 1.0 – 3.0 | Good |
+| < 1.0 | Drawdown is large relative to return |
+
+**When to use Calmar over Sharpe:** when your primary concern is drawdown control
+(e.g., investor capital, risk-of-ruin scenarios).
+
+### 17.4 Max Drawdown
+
+```
+max_drawdown = max((equity_peak - equity_trough) / equity_peak)  over all time
+```
+
+The intrabar worst point is used (low for longs, high for shorts), making this
+a conservative / realistic estimate of what you would have experienced live.
+
+**Drawdown is asymmetric:**
+
+```
+Drawdown  Recovery needed
+  10%  →     11.1%
+  20%  →     25.0%
+  50%  →    100.0%
+  80%  →    400.0%
+```
+
+A 50% drawdown requires doubling your remaining capital just to get back to flat.
+This asymmetry makes drawdown management as important as return maximization.
+
+**Rules of thumb:**
+
+| Strategy type | Acceptable max DD |
+|--------------|------------------|
+| Conservative (capital preservation) | < 10% |
+| Moderate (retail systematic) | 10 – 20% |
+| Aggressive (high return seeking) | 20 – 40% |
+| Speculative | > 40% (usually not sustainable) |
+
+### 17.5 Profit Factor
+
+```
+Profit Factor = gross_profit / gross_loss
+```
+
+Computed at the trade level (not bar level). A PF > 1.0 means wins exceed losses in
+aggregate. Note that PF does not account for the frequency of wins vs losses — a
+strategy with PF = 2.0 could be winning 30% of trades at 3:1 R or winning 67% at 1:1 R.
+
+**Combined interpretation (PF + win rate):**
+
+| Win Rate | PF needed to be profitable |
+|----------|---------------------------|
+| 30% | > 2.33 |
+| 40% | > 1.50 |
+| 50% | > 1.00 |
+| 60% | > 0.67 |
+| 70% | > 0.43 |
+
+Low win-rate strategies (trend followers) need high PF. High win-rate strategies
+(mean reversion) can survive with lower PF.
+
+### 17.6 Probabilistic Sharpe Ratio (PSR)
+
+```
+PSR = P(true_Sharpe > 0 | observed_Sharpe, num_trades)
+```
+
+The PSR adjusts the observed Sharpe for the number of trades (sample size). A Sharpe
+of 1.5 from 10 trades is far less reliable than 1.5 from 300 trades.
+
+| PSR | Interpretation |
+|-----|---------------|
+| > 0.99 | Very high confidence the strategy has positive true Sharpe |
+| 0.95 – 0.99 | High confidence |
+| 0.80 – 0.95 | Moderate — increase trade count before trusting |
+| < 0.80 | Low — likely noise; do not trust observed Sharpe |
+
+PSR is shown in purged K-fold CV mode (`--cv`), where it is computed on the
+full dataset length.
+
+### 17.7 Choosing a Sort Metric
+
+```python
+Strategy("MyStrat", signal=signal, sort="sharpe_ratio")   # default
+```
+
+| Priority | Use `sort=` |
+|----------|-------------|
+| Risk-adjusted return (balanced) | `"sharpe_ratio"` |
+| Drawdown control above all | `"calmar_ratio"` |
+| Downside risk sensitivity | `"sortino_ratio"` |
+| Raw return maximization | `"total_return_pct"` |
+| Consistent winning trades | `"win_rate_pct"` |
+| Risk:reward quality | `"profit_factor"` |
+| Avoiding illiquid strategies | `"num_trades"` |
+
+> **Warning:** sorting by `total_return_pct` or `win_rate_pct` alone strongly
+> encourages overfitting. Sharpe and Calmar are much harder to game because they
+> explicitly penalize variance and drawdown.
+
+---
+
+## 18. Multi-Strategy Runs and Capital Allocation
+
+### 18.1 Running Multiple Strategies Side by Side
+
+Pass a list of `Strategy` objects to compare them in one command:
+
+```python
+from siton.sdk import ema_cross, bollinger_bands, rsi, adx, Strategy, backtest
+
+signal_trend = ema_cross(fast=[8, 12], slow=[50, 100]).filter_by(
+    adx(periods=[14], thresholds=[25])
+)
+signal_mr = bollinger_bands(windows=[20], num_std=[2.0]) & rsi(
+    periods=[14], oversold=[30], overbought=[70]
+)
+
+STRATEGY = [
+    Strategy("TrendFollower", signal=signal_trend, top=5, sort="sharpe_ratio"),
+    Strategy("MeanReversion",  signal=signal_mr,    top=5, sort="sharpe_ratio"),
+]
+
+if __name__ == "__main__":
+    backtest(STRATEGY)
+```
+
+Both strategies are evaluated on the same data in one pass. The output shows
+two ranked tables, one per strategy. This lets you compare regime suitability
+directly — which one performs better on BTC/4h vs ETH/1h, for example.
+
+### 18.2 Multi-Asset Workflow
+
+Siton backtests one asset at a time. To evaluate a strategy across multiple assets,
+run it in a loop and collect results:
+
+```python
+from siton.sdk import ema_cross, adx, Strategy, run
+from siton.data import fetch_ohlcv
+import numpy as np
+
+signal = ema_cross(fast=[8, 12], slow=[50, 100]).filter_by(
+    adx(periods=[14], thresholds=[25])
+)
+strategy = Strategy("TrendCross", signal=signal, top=3)
+
+assets = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
+
+for symbol in assets:
+    df = fetch_ohlcv(symbol, "4h", start="2023-01-01")
+    data = {k: df[k].to_numpy().astype(np.float64) for k in ["open","high","low","close","volume"]}
+    results = run([strategy], data, timeframe="4h")
+    best = results[0]
+    print(f"{symbol:15s}  return={best.total_return_pct:+7.2f}%  "
+          f"sharpe={best.sharpe_ratio:.3f}  params={best.params}")
+```
+
+Look for strategies whose **best parameter set is stable across assets** — that is a
+strong sign of robustness rather than asset-specific curve fitting.
+
+### 18.3 Interpreting Multi-Asset Results
+
+| Pattern | Interpretation |
+|---------|---------------|
+| Same params win on all assets | Strategy is robust; parameter likely reflects market structure |
+| Different params win on each asset | Likely overfit to each asset's historical noise |
+| Positive on 3/4 assets | Consider asset-specific filtering in live deployment |
+| Negative on trending assets | Strategy is mean-reversion — only use in non-trending regimes |
+
+### 18.4 Capital Allocation Between Strategies
+
+Siton does not model a portfolio of concurrent positions — each strategy is
+evaluated as if it has full use of capital. For live multi-strategy deployment,
+apply a capital allocation fraction manually:
+
+```python
+# Allocate 60% of capital to trend, 40% to mean reversion
+STRATEGY = [
+    Strategy("Trend", signal=signal_trend, capital=60000.0, top=5),
+    Strategy("MeanRev", signal=signal_mr,  capital=40000.0, top=5),
+]
+```
+
+This only affects the absolute dollar P&L display — percentage-based metrics
+(return%, Sharpe) are unaffected by capital size.
+
+**Simple capital allocation guidelines:**
+
+| Strategy type | Typical allocation |
+|--------------|-------------------|
+| Primary (highest Sharpe) | 40 – 60% |
+| Secondary (complementary regime) | 20 – 40% |
+| Satellite (high-risk/high-reward) | 10 – 20% |
+| Cash / risk-free reserve | 10 – 20% |
+
+Strategies that are **negatively correlated** (trend-following + mean-reversion)
+complement each other and reduce portfolio-level drawdown when allocated together.
+
+### 18.5 Strategy Correlation Check
+
+Before allocating capital to two strategies, check whether their equity curves move
+together using the programmatic API:
+
+```python
+from siton.sdk import run
+import numpy as np
+
+results_trend = run([strategy_trend], data, timeframe="4h")
+results_mr    = run([strategy_mr],    data, timeframe="4h")
+
+curve_trend = results_trend[0].equity_curve
+curve_mr    = results_mr[0].equity_curve
+
+# Bar returns
+ret_trend = np.diff(curve_trend) / curve_trend[:-1]
+ret_mr    = np.diff(curve_mr)    / curve_mr[:-1]
+
+corr = np.corrcoef(ret_trend, ret_mr)[0, 1]
+print(f"Strategy correlation: {corr:.3f}")
+# corr ≈ 0     → uncorrelated — good diversification
+# corr > +0.7  → strategies move together — limited diversification benefit
+# corr < -0.3  → negatively correlated — excellent portfolio pair
+```
+
+> **Note:** `equity_curve` is only attached to results when using the programmatic
+> `run()` API. It is not printed by the CLI.
 
 ---
 

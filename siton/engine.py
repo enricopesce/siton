@@ -42,6 +42,7 @@ class Result:
     sortino_ratio: float = 0.0
     calmar_ratio: float = 0.0
     psr: float = 0.0
+    cv_consistency: float = 0.0   # fraction of CV folds with OOS sharpe > 0 (0 when not using CV)
 
 
 @nb.njit(cache=True, error_model="numpy")

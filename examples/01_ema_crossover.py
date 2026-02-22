@@ -27,6 +27,7 @@ STRATEGY = Strategy(
     signal=signal,
     top=5,          # show top 5 results
     sort="sharpe_ratio",
+    long_only=True
 )
 
 if __name__ == "__main__":

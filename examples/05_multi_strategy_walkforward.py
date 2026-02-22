@@ -1,19 +1,21 @@
-"""Example 5 — Multi-Strategy Walk-Forward Validation (Expert)
-==============================================================
-Compare three different strategy families head-to-head using expanding
-walk-forward validation to detect overfitting.
+"""Example 5 — Multi-Strategy Purged K-Fold CV (Expert)
+=======================================================
+Compare three different strategy families head-to-head using purged
+K-fold cross-validation, which gives K independent OOS estimates per
+combo and a cv_consistency metric to detect overfitting.
 
 Concepts introduced:
   - Multiple Strategy objects passed to backtest() / run()
   - Signal.majority(*signals) — majority vote across N signals
-  - validate=True + train_ratio — expanding walk-forward (in-sample / OOS)
+  - cv=True + cv_folds — purged K-fold cross-validation
+  - cv_consistency — fraction of folds with positive OOS Sharpe
   - Deflated Sharpe Ratio (PSR column) to penalise multiple testing
   - bollinger_bands(), obv(), channel_breakout() signals
   - Programmatic run() API — inspect Result objects directly
 
 Run:
     python examples/05_multi_strategy_walkforward.py --demo
-    siton examples/05_multi_strategy_walkforward.py --demo --validate
+    siton examples/05_multi_strategy_walkforward.py --demo --cv
 """
 
 from siton.sdk import (
@@ -34,8 +36,9 @@ strat_a = Strategy(
     stop_loss=[3.0, 5.0],
     top=5,
     sort="sharpe_ratio",
-    validate=True,
-    train_ratio=0.7,
+    cv=True,
+    cv_folds=5,
+    purge_bars=50,
 )
 
 # ── Strategy B: Mean reversion ────────────────────────────────────────────────
@@ -49,8 +52,9 @@ strat_b = Strategy(
     stop_loss=[2.0, 3.0],
     top=5,
     sort="sharpe_ratio",
-    validate=True,
-    train_ratio=0.7,
+    cv=True,
+    cv_folds=5,
+    purge_bars=50,
 )
 
 # ── Strategy C: Majority vote ensemble ───────────────────────────────────────
@@ -66,12 +70,12 @@ strat_c = Strategy(
     long_only=True,
     top=5,
     sort="sharpe_ratio",
-    validate=True,
-    train_ratio=0.7,
+    cv=True,
+    cv_folds=5,
+    purge_bars=50,
 )
 
 # ── STRATEGY list (used by siton CLI) ─────────────────────────────────────────
-# The CLI runs each Strategy independently; pass them all to backtest().
 STRATEGY = strat_a   # default when invoked via `siton` CLI (single strategy)
 
 # ── Programmatic comparison (run directly) ────────────────────────────────────
@@ -91,20 +95,21 @@ if __name__ == "__main__":
             print(f"{'=' * 60}")
             results = run(strat, df, timeframe="1h")
             if isinstance(results, dict):
-                train_top = results["train"]
-                test_top  = results["test"]
-                print(f"  {'Metric':<18} {'In-Sample':>12} {'Out-of-Sample':>14}")
-                print(f"  {'-'*46}")
-                if train_top and test_top:
-                    best_tr = train_top[0]
-                    best_te = test_top[0]
-                    print(f"  {'Total Return %':<18} {best_tr.total_return_pct:>+11.2f}% {best_te.total_return_pct:>+13.2f}%")
-                    print(f"  {'Sharpe Ratio':<18} {best_tr.sharpe_ratio:>12.3f} {best_te.sharpe_ratio:>14.3f}")
-                    print(f"  {'Max Drawdown %':<18} {best_tr.max_drawdown_pct:>12.2f} {best_te.max_drawdown_pct:>14.2f}")
-                    print(f"  {'Win Rate %':<18} {best_tr.win_rate_pct:>11.2f}% {best_te.win_rate_pct:>13.2f}%")
-                    print(f"  {'Trades':<18} {best_tr.num_trades:>12} {best_te.num_trades:>14}")
-                    print(f"  {'PSR (DSR)':<18} {best_tr.psr:>12.3f} {best_te.psr:>14.3f}")
-                    print(f"  Best params: {best_tr.params}")
+                aggregated = results["aggregated"]
+                n_folds = len(results["folds"])
+                print(f"  {'Metric':<18} {'Aggregated OOS':>14}")
+                print(f"  {'-'*34}")
+                if aggregated:
+                    best = aggregated[0]
+                    cons = f"{int(best.cv_consistency * n_folds)}/{n_folds}"
+                    print(f"  {'Total Return %':<18} {best.total_return_pct:>+13.2f}%")
+                    print(f"  {'Sharpe Ratio':<18} {best.sharpe_ratio:>14.3f}")
+                    print(f"  {'Max Drawdown %':<18} {best.max_drawdown_pct:>14.2f}")
+                    print(f"  {'Win Rate %':<18} {best.win_rate_pct:>13.2f}%")
+                    print(f"  {'Trades (total)':<18} {best.num_trades:>14}")
+                    print(f"  {'PSR':<18} {best.psr:>14.3f}")
+                    print(f"  {'Consistency':<18} {cons:>14}")
+                    print(f"  Best params: {best.params}")
             else:
                 for r in results[:3]:
                     print(f"  {r.strategy}: return={r.total_return_pct:+.2f}% sharpe={r.sharpe_ratio:.3f} psr={r.psr:.3f}")

@@ -1619,9 +1619,10 @@ class Strategy:
         sort="sharpe_ratio",
         long_only=False,
         risk_free_rate=0.0,
-        validate=False,
-        train_ratio=0.7,
         n_splits=5,
+        cv: bool = False,
+        cv_folds: int = 5,
+        purge_bars: int = 50,
         atr_period=14,
         atr_stop_mult=None,
         atr_tp_mult=None,
@@ -1649,9 +1650,10 @@ class Strategy:
         self.sort = sort
         self.long_only = long_only
         self.risk_free_rate = risk_free_rate
-        self.validate = validate
-        self.train_ratio = train_ratio
         self.n_splits = n_splits
+        self.cv = cv
+        self.cv_folds = cv_folds
+        self.purge_bars = purge_bars
         self.atr_period = atr_period
         self.atr_stop_mult = _ensure_list(atr_stop_mult)
         self.atr_tp_mult = _ensure_list(atr_tp_mult)
@@ -1991,6 +1993,53 @@ def _run_batch(
     return results
 
 
+def _purged_kfold_splits(n_bars, cv_folds, purge_bars):
+    """Anchored expanding purged k-fold splits.
+
+    Returns list of (train_end, test_start, test_end).
+    Fold 0 is skipped (no prior training data).
+    purge_bars are removed from the end of each training window to avoid
+    indicator warm-up contamination at the train/test boundary.
+    """
+    fold_size = n_bars // cv_folds
+    splits = []
+    for k in range(1, cv_folds):
+        test_start = k * fold_size
+        test_end = (k + 1) * fold_size if k < cv_folds - 1 else n_bars
+        train_end = test_start - purge_bars
+        if train_end < fold_size:          # need ≥1 full fold of training
+            continue
+        splits.append((train_end, test_start, test_end))
+    return splits
+
+
+def _aggregate_cv_results(oos_accumulator):
+    """Average OOS metrics across all folds for each unique param combo.
+
+    oos_accumulator: dict mapping (strategy, params_tuple) -> list[Result]
+    Returns list[Result] with mean metrics and cv_consistency populated.
+    """
+    aggregated = []
+    for (strategy, params_key), fold_results in oos_accumulator.items():
+        n = len(fold_results)
+        aggregated.append(
+            Result(
+                strategy=strategy,
+                params=dict(params_key),
+                total_return_pct=sum(r.total_return_pct for r in fold_results) / n,
+                sharpe_ratio=sum(r.sharpe_ratio for r in fold_results) / n,
+                max_drawdown_pct=sum(r.max_drawdown_pct for r in fold_results) / n,
+                win_rate_pct=sum(r.win_rate_pct for r in fold_results) / n,
+                num_trades=sum(r.num_trades for r in fold_results),
+                profit_factor=sum(r.profit_factor for r in fold_results) / n,
+                sortino_ratio=sum(r.sortino_ratio for r in fold_results) / n,
+                calmar_ratio=sum(r.calmar_ratio for r in fold_results) / n,
+                cv_consistency=sum(1 for r in fold_results if r.sharpe_ratio > 0) / n,
+            )
+        )
+    return aggregated
+
+
 def run(
     strategies,
     df_or_data,
@@ -2018,8 +2067,8 @@ def run(
     Strategy-level values take priority, then function params, then defaults.
 
     Returns:
-        list[Result] when validate=False (default).
-        dict with 'train' and 'test' lists when validate=True.
+        list[Result] when cv=False (default).
+        dict with 'folds', 'aggregated', 'stability', 'cv_folds', 'purge_bars' when cv=True.
     """
     if isinstance(strategies, Strategy):
         strategies = [strategies]
@@ -2100,185 +2149,140 @@ def run(
         _raw_atr = talib.ATR(high, low, close, timeperiod=atr_period)
         atr_arr_full = np.ascontiguousarray(_raw_atr.astype(np.float64))
 
-    # Walk-forward validation: single IS batch + contiguous OOS + stability
-    validate = any(s.validate for s in strategies)
-    if validate:
-        train_ratio = strategies[0].train_ratio
+    # ── Purged K-Fold CV ────────────────────────────────────────────────────
+    cv = any(s.cv for s in strategies)
+    if cv:
+        cv_folds = strategies[0].cv_folds
+        purge_bars = strategies[0].purge_bars
         n_splits = strategies[0].n_splits
-        split = int(n_bars * train_ratio)
-        oos_len = n_bars - split
         _pm_keys = {"stop_loss", "take_profit", "trailing_stop"}
 
-        # Step 1 — IS: run all combos on [0:split]
-        is_atr = np.ascontiguousarray(atr_arr_full[:split]) if atr_arr_full is not None else None
-        is_results = _run_batch(
-            np.ascontiguousarray(close[:split]),
-            np.ascontiguousarray(high[:split]),
-            np.ascontiguousarray(low[:split]),
-            np.ascontiguousarray(open_arr[:split]),
-            np.ascontiguousarray(signals_2d[:, :split]),
-            combos,
-            combo_strat,
-            strategies,
-            fee_dec,
-            slip_dec,
-            capital,
-            fraction,
-            ann,
-            rf_per_bar,
-            use_managed,
-            atr_arr=is_atr,
-            risk_per_trade=risk_per_trade,
-        )
-        train_top = rank_results(is_results, sort_by=sort)[:top]
+        splits = _purged_kfold_splits(n_bars, cv_folds, purge_bars)
+        fold_details = []
+        oos_accumulator: dict = {}
 
-        # Step 2 — OOS: regenerate signals for top-K IS winners, slice to [split:]
-        # Preserves IS rank — no re-ranking by OOS performance
-        top_signal_params = [
-            (r.strategy, {k: v for k, v in r.params.items() if k not in _pm_keys})
-            for r in train_top
-        ]
-        top_combo_strat_idx = [name_to_strat_idx[n] for n, _ in top_signal_params]
-        oos_sigs = np.empty((len(top_signal_params), oos_len), dtype=np.float64)
-        for i, (name, params) in enumerate(top_signal_params):
-            full = strat_lookup[name](data, **params)
-            n_total = len(full)
-            shifted = np.empty(n_total, dtype=np.float64)
-            shifted[0] = 0.0
-            shifted[1:] = full[:-1]
-            if long_only:
-                shifted = np.where(shifted < 0.0, 0.0, shifted)
-            oos_sigs[i] = shifted[split : split + oos_len]
-        clear_cache()
-        oos_atr = np.ascontiguousarray(atr_arr_full[split:]) if atr_arr_full is not None else None
-        oos_results = _run_batch(
-            np.ascontiguousarray(close[split:]),
-            np.ascontiguousarray(high[split:]),
-            np.ascontiguousarray(low[split:]),
-            np.ascontiguousarray(open_arr[split:]),
-            oos_sigs,
-            top_signal_params,
-            top_combo_strat_idx,
-            strategies,
-            fee_dec,
-            slip_dec,
-            capital,
-            fraction,
-            ann,
-            rf_per_bar,
-            use_managed,
-            atr_arr=oos_atr,
-            risk_per_trade=risk_per_trade,
-        )
+        for train_end, test_start, test_end in splits:
+            oos_len_fold = test_end - test_start
 
-        # Match OOS results back to IS winners by full params — no re-ranking
-        oos_lookup = {(r.strategy, tuple(sorted(r.params.items()))): r for r in oos_results}
-        test_top = []
-        for r in train_top:
-            key = (r.strategy, tuple(sorted(r.params.items())))
-            oos_r = oos_lookup.get(key)
-            if oos_r is not None:
-                test_top.append(oos_r)
+            # IS: run all combos on [0:train_end]
+            is_atr = np.ascontiguousarray(atr_arr_full[:train_end]) if atr_arr_full is not None else None
+            fold_is = _run_batch(
+                np.ascontiguousarray(close[:train_end]),
+                np.ascontiguousarray(high[:train_end]),
+                np.ascontiguousarray(low[:train_end]),
+                np.ascontiguousarray(open_arr[:train_end]),
+                np.ascontiguousarray(signals_2d[:, :train_end]),
+                combos, combo_strat, strategies,
+                fee_dec, slip_dec, capital, fraction, ann, rf_per_bar, use_managed,
+                atr_arr=is_atr, risk_per_trade=risk_per_trade,
+            )
+            fold_is_top = rank_results(fold_is, sort_by=sort)[:top]
 
-        # Step 3 — Stability: expanding IS windows to track top-1 parameter robustness
+            # OOS: regenerate signals for IS top-K, test on [test_start:test_end]
+            top_signal_params = [
+                (r.strategy, {k: v for k, v in r.params.items() if k not in _pm_keys})
+                for r in fold_is_top
+            ]
+            top_combo_strat_idx = [name_to_strat_idx[n] for n, _ in top_signal_params]
+            oos_sigs = np.empty((len(top_signal_params), oos_len_fold), dtype=np.float64)
+            for i, (sname, sparams) in enumerate(top_signal_params):
+                full = strat_lookup[sname](data, **sparams)
+                shifted = np.empty(len(full), dtype=np.float64)
+                shifted[0] = 0.0
+                shifted[1:] = full[:-1]
+                if long_only:
+                    shifted = np.where(shifted < 0.0, 0.0, shifted)
+                oos_sigs[i] = shifted[test_start:test_end]
+            clear_cache()
+
+            oos_atr = (
+                np.ascontiguousarray(atr_arr_full[test_start:test_end])
+                if atr_arr_full is not None else None
+            )
+            fold_oos = _run_batch(
+                np.ascontiguousarray(close[test_start:test_end]),
+                np.ascontiguousarray(high[test_start:test_end]),
+                np.ascontiguousarray(low[test_start:test_end]),
+                np.ascontiguousarray(open_arr[test_start:test_end]),
+                oos_sigs,
+                top_signal_params, top_combo_strat_idx, strategies,
+                fee_dec, slip_dec, capital, fraction, ann, rf_per_bar, use_managed,
+                atr_arr=oos_atr, risk_per_trade=risk_per_trade,
+            )
+
+            # WFE for top IS combo: OOS return / IS return
+            # _run_batch re-adds PM params from the strategy, so both IS and OOS
+            # results carry full params — match on full param tuple
+            wfe = None
+            if fold_is_top and fold_oos:
+                is_best = fold_is_top[0]
+                full_key = (is_best.strategy, tuple(sorted(is_best.params.items())))
+                oos_lkp = {(r.strategy, tuple(sorted(r.params.items()))): r for r in fold_oos}
+                top_oos = oos_lkp.get(full_key)
+                if top_oos is not None and is_best.total_return_pct > 0:
+                    wfe = top_oos.total_return_pct / is_best.total_return_pct
+
+            for r in fold_oos:
+                key = (r.strategy, tuple(sorted(r.params.items())))
+                oos_accumulator.setdefault(key, []).append(r)
+
+            fold_details.append({
+                "fold": len(fold_details) + 1,
+                "train_range": (0, train_end),
+                "test_range": (test_start, test_end),
+                "train_top": fold_is_top,
+                "test_results": fold_oos,
+                "wfe": wfe,
+            })
+            clear_sdk_cache()
+
+        # Stability: expand last fold's IS window into its OOS region
         stability = []
-        if train_top:
-            stability.append((split, dict(train_top[0].params), train_top[0].sharpe_ratio))
-        if n_splits > 1 and oos_len > 0:
-            step = max(oos_len // n_splits, 50)
-            for k in range(1, n_splits):
-                tr_end = split + k * step
-                if tr_end >= n_bars:
-                    break
-                win_atr = (
-                    np.ascontiguousarray(atr_arr_full[:tr_end])
-                    if atr_arr_full is not None
-                    else None
-                )
-                win_results = _run_batch(
-                    np.ascontiguousarray(close[:tr_end]),
-                    np.ascontiguousarray(high[:tr_end]),
-                    np.ascontiguousarray(low[:tr_end]),
-                    np.ascontiguousarray(open_arr[:tr_end]),
-                    np.ascontiguousarray(signals_2d[:, :tr_end]),
-                    combos,
-                    combo_strat,
-                    strategies,
-                    fee_dec,
-                    slip_dec,
-                    capital,
-                    fraction,
-                    ann,
-                    rf_per_bar,
-                    use_managed,
-                    atr_arr=win_atr,
-                    risk_per_trade=risk_per_trade,
-                )
-                win_ranked = rank_results(win_results, sort_by=sort)
-                if win_ranked:
-                    best = win_ranked[0]
-                    stability.append((tr_end, dict(best.params), best.sharpe_ratio))
-        clear_sdk_cache()
+        if fold_details:
+            last = fold_details[-1]
+            last_train_end = last["train_range"][1]
+            last_test_end = last["test_range"][1]
+            oos_len_last = last_test_end - last_train_end
+            if last["train_top"]:
+                stability.append((last_train_end, dict(last["train_top"][0].params), last["train_top"][0].sharpe_ratio))
+            if n_splits > 1 and oos_len_last > 0:
+                step = max(oos_len_last // n_splits, 50)
+                for k in range(1, n_splits):
+                    tr_end = last_train_end + k * step
+                    if tr_end >= n_bars:
+                        break
+                    stab_atr = (
+                        np.ascontiguousarray(atr_arr_full[:tr_end])
+                        if atr_arr_full is not None else None
+                    )
+                    stab_results = _run_batch(
+                        np.ascontiguousarray(close[:tr_end]),
+                        np.ascontiguousarray(high[:tr_end]),
+                        np.ascontiguousarray(low[:tr_end]),
+                        np.ascontiguousarray(open_arr[:tr_end]),
+                        np.ascontiguousarray(signals_2d[:, :tr_end]),
+                        combos, combo_strat, strategies,
+                        fee_dec, slip_dec, capital, fraction, ann, rf_per_bar, use_managed,
+                        atr_arr=stab_atr, risk_per_trade=risk_per_trade,
+                    )
+                    stab_ranked = rank_results(stab_results, sort_by=sort)
+                    if stab_ranked:
+                        best = stab_ranked[0]
+                        stability.append((tr_end, dict(best.params), best.sharpe_ratio))
 
-        # Step 4 — Equity curves with correct bar offsets
-        _attach_equity_curves(
-            train_top,
-            np.ascontiguousarray(close[:split]),
-            np.ascontiguousarray(high[:split]),
-            np.ascontiguousarray(low[:split]),
-            np.ascontiguousarray(open_arr[:split]),
-            strat_lookup,
-            data,
-            fee_dec,
-            slip_dec,
-            capital,
-            fraction,
-            ann,
-            rf_per_bar,
-            use_managed,
-            strategies,
-            name_to_strat_idx,
-            long_only,
-            bar_offset=0,
-            atr_arr=np.ascontiguousarray(atr_arr_full[:split])
-            if atr_arr_full is not None
-            else None,
-            risk_per_trade=risk_per_trade,
-        )
+        aggregated = _aggregate_cv_results(oos_accumulator)
+        aggregated = rank_results(aggregated, sort_by=sort)[:top]
+        deflated_sharpe_ratio(aggregated, n_bars)
 
-        _attach_equity_curves(
-            test_top,
-            np.ascontiguousarray(close[split:]),
-            np.ascontiguousarray(high[split:]),
-            np.ascontiguousarray(low[split:]),
-            np.ascontiguousarray(open_arr[split:]),
-            strat_lookup,
-            data,
-            fee_dec,
-            slip_dec,
-            capital,
-            fraction,
-            ann,
-            rf_per_bar,
-            use_managed,
-            strategies,
-            name_to_strat_idx,
-            long_only,
-            bar_offset=split,
-            atr_arr=np.ascontiguousarray(atr_arr_full[split:])
-            if atr_arr_full is not None
-            else None,
-            risk_per_trade=risk_per_trade,
-        )
+        return {
+            "folds": fold_details,
+            "aggregated": aggregated,
+            "cv_folds": cv_folds,
+            "purge_bars": purge_bars,
+            "stability": stability,
+        }
 
-        # Step 5 — DSR
-        deflated_sharpe_ratio(train_top, split)
-        if test_top:
-            deflated_sharpe_ratio(test_top, oos_len)
-
-        return {"train": train_top, "test": test_top, "stability": stability, "split": split}
-
-    # Non-validate: run all combos at once
+    # Plain: run all combos at once
     all_results = _run_batch(
         close,
         high,
@@ -2348,8 +2352,9 @@ def backtest(*strategies):
     parser.add_argument("--end", metavar="DATE", help="End date YYYY-MM-DD")
     parser.add_argument("--csv", help="Load OHLCV from CSV file")
     parser.add_argument("--demo", action="store_true", help="Use synthetic data")
-    parser.add_argument("--validate", action="store_true", help="Enable walk-forward validation")
-    parser.add_argument("--train-ratio", type=float, default=None, help="Train/test split ratio")
+    parser.add_argument("--cv", action="store_true", help="Enable purged K-fold cross-validation")
+    parser.add_argument("--cv-folds", type=int, default=None, help="Number of CV folds (default: 5)")
+    parser.add_argument("--purge-bars", type=int, default=None, help="Bars to purge at train/test boundary (default: 50)")
     args = parser.parse_args()
 
     from siton.data import fetch_ohlcv, generate_sample, load_csv
@@ -2395,10 +2400,12 @@ def backtest(*strategies):
     buy_hold_pct = (close[-1] / close[0] - 1.0) * 100.0
 
     first = strategies[0]
-    if args.validate:
-        first.validate = True
-    if args.train_ratio is not None:
-        first.train_ratio = args.train_ratio
+    if args.cv:
+        first.cv = True
+    if args.cv_folds is not None:
+        first.cv_folds = args.cv_folds
+    if args.purge_bars is not None:
+        first.purge_bars = args.purge_bars
     top = first.top
     sort = first.sort
 
@@ -2406,55 +2413,51 @@ def backtest(*strategies):
     results = run(list(strategies), data, timeframe=args.timeframe)
     elapsed = time.perf_counter() - t1
 
-    if isinstance(results, dict):
+    if isinstance(results, dict) and "folds" in results:
         print(f"    Done in {elapsed:.4f}s")
-        train_top = results["train"]
-        test_top = results["test"]
-        stability = results.get("stability", [])
-        split = results.get("split", 0)
-        n_bars = len(close)
+        cv_folds_used = results["cv_folds"]
+        purge_bars_used = results["purge_bars"]
+        aggregated = results["aggregated"]
+        fold_details = results["folds"]
+        n_folds_run = len(fold_details)
 
-        # IS table
         print(f"\n{'=' * 70}")
-        print(f"  IN-SAMPLE (TRAIN) — TOP {top} (sorted by {sort})")
+        print(f"  PURGED K-FOLD CV — {cv_folds_used} FOLDS, PURGE={purge_bars_used} BARS")
         print(f"{'=' * 70}")
-        header = f"{'#':>3} {'Strategy':<20} {'Return%':>9} {'Sharpe':>8} {'MaxDD%':>8} {'WinRate%':>9} {'Trades':>7} {'PF':>7} {'PSR':>6}  Params"
+        print(f"  AGGREGATED OOS (sorted by {sort})")
+        print(f"{'=' * 70}")
+        header = f"{'#':>3} {'Strategy':<20} {'Return%':>9} {'Sharpe':>8} {'MaxDD%':>8} {'WinRate%':>9} {'Trades':>7} {'PF':>7} {'PSR':>6} {'Cons':>6}  Params"
         print(header)
-        print("-" * len(header) + "-" * 30)
-        for i, r in enumerate(train_top[:top], 1):
+        print("-" * len(header) + "-" * 10)
+        for i, r in enumerate(aggregated[:top], 1):
             params_str = ", ".join(f"{k}={v}" for k, v in r.params.items())
+            cons_str = f"{int(round(r.cv_consistency * n_folds_run))}/{n_folds_run}"
             print(
                 f"{i:>3} {r.strategy:<20} {r.total_return_pct:>+8.2f}% "
                 f"{r.sharpe_ratio:>8.3f} {r.max_drawdown_pct:>8.2f} "
-                f"{r.win_rate_pct:>8.2f}% {r.num_trades:>7} {r.profit_factor:>7.3f} {r.psr:>6.3f}  {params_str}"
+                f"{r.win_rate_pct:>8.2f}% {r.num_trades:>7} {r.profit_factor:>7.3f} {r.psr:>6.3f} {cons_str:>6}  {params_str}"
             )
 
-        # OOS table with WFE column — IS rank order preserved, no OOS re-ranking
-        is_return_lookup = {
-            (r.strategy, tuple(sorted(r.params.items()))): r.total_return_pct for r in train_top
-        }
-        print(f"\n{'=' * 70}")
-        print("  OUT-OF-SAMPLE (TEST) — IS RANK ORDER (no OOS re-ranking)")
-        print(f"{'=' * 70}")
-        header_oos = f"{'#':>3} {'Strategy':<20} {'Return%':>9} {'Sharpe':>8} {'MaxDD%':>8} {'WinRate%':>9} {'Trades':>7} {'PF':>7} {'PSR':>6} {'WFE':>6}  Params"
-        print(header_oos)
-        print("-" * len(header_oos) + "-" * 30)
-        for i, r in enumerate(test_top[:top], 1):
-            params_str = ", ".join(f"{k}={v}" for k, v in r.params.items())
-            is_ret = is_return_lookup.get((r.strategy, tuple(sorted(r.params.items()))))
-            if is_ret is not None and is_ret > 0.0:
-                wfe_str = f"{r.total_return_pct / is_ret:>6.2f}"
-            else:
-                wfe_str = f"{'N/A':>6}"
-            print(
-                f"{i:>3} {r.strategy:<20} {r.total_return_pct:>+8.2f}% "
-                f"{r.sharpe_ratio:>8.3f} {r.max_drawdown_pct:>8.2f} "
-                f"{r.win_rate_pct:>8.2f}% {r.num_trades:>7} {r.profit_factor:>7.3f} {r.psr:>6.3f} {wfe_str}  {params_str}"
-            )
+        print("\n  FOLD DETAILS")
+        for fd in fold_details:
+            tr0, tr1 = fd["train_range"]
+            ts0, ts1 = fd["test_range"]
+            wfe_fold = fd.get("wfe")
+            wfe_str = f"  WFE={wfe_fold:.3g}x" if wfe_fold is not None else ""
+            print(f"  Fold {fd['fold']}: train=[{tr0}:{tr1}]  test=[{ts0}:{ts1}]{wfe_str}")
+            if fd["train_top"]:
+                best_is = fd["train_top"][0]
+                is_params = ", ".join(f"{k}={v}" for k, v in best_is.params.items())
+                print(f"    IS top-1: {is_params} | Sharpe={best_is.sharpe_ratio:.3f}")
+            if fd["test_results"]:
+                ranked_oos = rank_results(fd["test_results"], sort_by=sort)
+                best_oos = ranked_oos[0]
+                oos_params = ", ".join(f"{k}={v}" for k, v in best_oos.params.items())
+                print(f"    OOS best: {oos_params} | Return={best_oos.total_return_pct:+.2f}%  Sharpe={best_oos.sharpe_ratio:.3f}")
 
-        # Parameter stability section
+        stability = results.get("stability", [])
         if stability:
-            print("\n  PARAMETER STABILITY (top-1 as IS window expands)")
+            print(f"\n  PARAMETER STABILITY (top-1 as last-fold IS expands into OOS)")
             baseline_params = stability[0][1]
             agree_count = 0
             for j, (tr_end, params, sharpe) in enumerate(stability):
@@ -2468,37 +2471,12 @@ def backtest(*strategies):
                 else:
                     marker = "<- changed"
                 print(
-                    f"    {tr_end} bars ({tr_end * 100 / n_bars:.0f}%): {params_str} -- Sharpe {sharpe:.3f}  {marker}"
+                    f"    {tr_end} bars ({tr_end * 100 / len(close):.0f}%): {params_str} -- Sharpe {sharpe:.3f}  {marker}"
                 )
             print(f"    Stability: {agree_count}/{len(stability)} windows agree with IS winner")
 
-        # Best strategy summary
-        if train_top:
-            best_is = train_top[0]
-            best_oos = None
-            best_key = (best_is.strategy, tuple(sorted(best_is.params.items())))
-            for r in test_top:
-                if (r.strategy, tuple(sorted(r.params.items()))) == best_key:
-                    best_oos = r
-                    break
-            print(f"\n{'=' * 70}")
-            print(f"  BEST STRATEGY: {best_is.strategy}")
-            print(f"  Params: {best_is.params}")
-            print(
-                f"  IS  Return: {best_is.total_return_pct:>+8.2f}% | Sharpe: {best_is.sharpe_ratio:.3f} | MaxDD: {best_is.max_drawdown_pct:.2f}%"
-            )
-            if best_oos:
-                wfe_str = (
-                    f"{best_oos.total_return_pct / best_is.total_return_pct:.2f}x"
-                    if best_is.total_return_pct > 0.0
-                    else "N/A"
-                )
-                print(
-                    f"  OOS Return: {best_oos.total_return_pct:>+8.2f}% | Sharpe: {best_oos.sharpe_ratio:.3f} | MaxDD: {best_oos.max_drawdown_pct:.2f}%  WFE: {wfe_str}"
-                )
-
-        print(f"\n  IS bars: {split} | OOS bars: {n_bars - split}")
-        print(f"  Full-period Buy & Hold: {buy_hold_pct:+.2f}%")
+        print(f"\n  Buy & Hold: {buy_hold_pct:+.2f}%")
+        print(f"{'=' * 70}")
     else:
         total_combos = _last_n_combos
         print(

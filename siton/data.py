@@ -1,10 +1,30 @@
 """Data ingestion — exchange via ccxt, CSV, or synthetic generator."""
 
 import math
+import os
 import warnings
+from pathlib import Path
 
 import numpy as np
 import polars as pl
+
+# Timeframe → seconds (mirrors sdk._TIMEFRAME_SECONDS; kept local to avoid circular import)
+_TF_SECONDS: dict[str, int] = {
+    "1m": 60,
+    "3m": 180,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
+    "1h": 3600,
+    "2h": 7200,
+    "4h": 14400,
+    "6h": 21600,
+    "8h": 28800,
+    "12h": 43200,
+    "1d": 86400,
+    "3d": 259200,
+    "1w": 604800,
+}
 
 
 def _parse_date_ms(date_str: str) -> int:
@@ -44,74 +64,71 @@ def _check_gaps(df: pl.DataFrame, timeframe: str, max_gap_factor: float = 2.5) -
         )
 
 
-def fetch_ohlcv(
-    symbol: str = "BTC/USDT",
-    timeframe: str = "1h",
-    exchange_id: str = "binance",
-    limit: int = 5000,
-    start: str | None = None,
-    end: str | None = None,
-) -> pl.DataFrame:
-    """Fetch OHLCV candles from exchange via ccxt (paginates automatically).
+# ---------------------------------------------------------------------------
+# Cache helpers
+# ---------------------------------------------------------------------------
 
-    Args:
-        start: Optional start date as YYYY-MM-DD (inclusive).
-        end: Optional end date as YYYY-MM-DD (inclusive, fetches through end of day).
+
+def _cache_path(
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    start: str | None,
+    end: str | None,
+    limit: int,
+) -> Path:
+    """Return the parquet cache file path for a given fetch request.
+
+    Layout: $SITON_CACHE_DIR/{exchange}/{symbol}/{timeframe}/{key}.parquet
+    Key:
+      - Fixed range  : "{start}_{end}"   — immutable, cached forever
+      - Open-ended   : "{start}_live"    — incrementally extended
+      - Limit-only   : "last_{limit}"    — sliding window, refreshed when stale
     """
-    import ccxt
-
-    exchange_class = getattr(ccxt, exchange_id)
-    exchange = exchange_class({"enableRateLimit": True})
-    exchange.load_markets()
-
-    tf_seconds = exchange.parse_timeframe(timeframe)
-    tf_ms = tf_seconds * 1000
-    batch = 1000
-
-    if start:
-        since = _parse_date_ms(start)
+    root = Path(os.environ.get("SITON_CACHE_DIR", Path.home() / ".cache" / "siton"))
+    sym = symbol.replace("/", "-")
+    if start and end:
+        fname = f"{start}_{end}.parquet"
+    elif start:
+        fname = f"{start}_live.parquet"
     else:
-        since = exchange.milliseconds() - limit * tf_ms
+        fname = f"last_{limit}.parquet"
+    return root / exchange / sym / timeframe / fname
 
-    end_ms = _parse_date_ms(end) + 86_400_000 if end else None  # end of day
 
-    # When date range is given, fetch until end (ignore limit)
-    use_limit = end_ms is None
-    all_ohlcv = []
-
+def _fetch_raw(
+    exchange,
+    symbol: str,
+    timeframe: str,
+    since: int,
+    end_ms: int | None,
+    batch: int,
+    limit: int | None = None,
+) -> list:
+    """Paginate ccxt.fetch_ohlcv and return raw [[ts,o,h,l,c,v], ...] rows."""
+    all_ohlcv: list = []
+    use_limit = limit is not None
     while True:
         if use_limit and len(all_ohlcv) >= limit:
             break
-        remaining = limit - len(all_ohlcv) if use_limit else batch
-        fetch_size = min(remaining, batch)
+        fetch_size = min((limit - len(all_ohlcv)) if use_limit else batch, batch)
         chunk = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=fetch_size)
         if not chunk:
             break
-        # Stop if we've passed the end date
         if end_ms and chunk[0][0] >= end_ms:
             break
         all_ohlcv.extend(chunk)
         since = chunk[-1][0] + 1
         if end_ms and since >= end_ms:
             break
+    return all_ohlcv
 
-    seen = set()
-    unique = []
-    for c in all_ohlcv:
-        if c[0] not in seen:
-            seen.add(c[0])
-            unique.append(c)
-    all_ohlcv = unique
 
-    # Trim to date range
-    if end_ms:
-        all_ohlcv = [c for c in all_ohlcv if c[0] < end_ms]
-    if use_limit:
-        all_ohlcv = all_ohlcv[:limit]
-
-    df = (
+def _raw_to_df(ohlcv: list) -> pl.DataFrame:
+    """Convert raw ccxt rows to a sorted Polars DataFrame."""
+    return (
         pl.DataFrame(
-            all_ohlcv,
+            ohlcv,
             schema=["timestamp", "open", "high", "low", "close", "volume"],
             orient="row",
         )
@@ -120,6 +137,156 @@ def fetch_ohlcv(
         )
         .sort("timestamp")
     )
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def fetch_ohlcv(
+    symbol: str = "BTC/USDT",
+    timeframe: str = "1h",
+    exchange_id: str = "binance",
+    limit: int = 5000,
+    start: str | None = None,
+    end: str | None = None,
+    cache: bool = True,
+    verbose: bool = False,
+) -> pl.DataFrame:
+    """Fetch OHLCV candles from exchange via ccxt with an intelligent disk cache.
+
+    Cache lives at ~/.cache/siton/ (override with $SITON_CACHE_DIR):
+      - Fixed range (start+end): cached permanently — historical data never changes.
+      - Open-ended  (start only): incrementally extended — only new bars are fetched.
+      - Limit-only  (no dates):   refreshed when last bar is >2 bars behind now.
+
+    Args:
+        start:   Optional start date YYYY-MM-DD (inclusive).
+        end:     Optional end date YYYY-MM-DD (inclusive, through end of day).
+        cache:   Use local disk cache (default True).
+        verbose: Print cache/fetch status messages (default False).
+    """
+    import time as _time
+
+    tf_ms = _TF_SECONDS.get(timeframe, 3600) * 1000
+    end_ms = _parse_date_ms(end) + 86_400_000 if end else None
+    # Only apply the `limit` cap when no date range is given at all
+    use_limit = start is None and end_ms is None
+
+    # ------------------------------------------------------------------
+    # Step 1: Try to return directly from cache (no exchange init needed)
+    # ------------------------------------------------------------------
+    path = _cache_path(exchange_id, symbol, timeframe, start, end, limit) if cache else None
+    cached: pl.DataFrame | None = None
+
+    if path and path.exists():
+        cached = pl.read_parquet(path)
+        last_ts = int(cached["timestamp"][-1])
+        now_ms = int(_time.time() * 1000)
+
+        if end is not None:
+            # Fixed historical range — always valid, never re-fetch
+            if verbose:
+                print(f"\n[*] Loaded {len(cached)} {timeframe} candles from cache.")
+            _check_gaps(cached, timeframe)
+            return cached
+
+        if not use_limit and last_ts >= now_ms - tf_ms:
+            # Open-ended: last bar is within one timeframe of now
+            if verbose:
+                print(f"\n[*] Loaded {len(cached)} {timeframe} candles from cache (up to date).")
+            _check_gaps(cached, timeframe)
+            return cached
+
+        if use_limit and last_ts >= now_ms - tf_ms * 2:
+            # Limit-only: at most 2 bars stale
+            if verbose:
+                print(f"\n[*] Loaded {len(cached)} {timeframe} candles from cache (up to date).")
+            _check_gaps(cached, timeframe)
+            return cached.tail(limit)
+
+    # ------------------------------------------------------------------
+    # Step 2: Init exchange, then fetch (full or incremental delta)
+    # ------------------------------------------------------------------
+    import ccxt
+
+    exchange = getattr(ccxt, exchange_id)({"enableRateLimit": True})
+    exchange.load_markets()
+    tf_ms = exchange.parse_timeframe(timeframe) * 1000  # precise value from exchange
+    batch = 1000
+
+    if cached is not None:
+        # Incremental update — fetch only candles newer than what we have
+        last_ts = int(cached["timestamp"][-1])
+        delta_since = last_ts + tf_ms
+
+        if verbose:
+            from datetime import datetime, timezone
+
+            last_dt = datetime.fromtimestamp(last_ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+            print(f"\n[*] Cache hit ({len(cached)} candles to {last_dt}), fetching new candles...")
+
+        raw_delta = _fetch_raw(exchange, symbol, timeframe, delta_since, end_ms, batch)
+
+        if raw_delta:
+            if verbose:
+                print(f"    +{len(raw_delta)} new candles fetched.")
+            df_new = _raw_to_df(raw_delta)
+            merged = pl.concat([cached, df_new]).unique("timestamp").sort("timestamp")
+            if use_limit:
+                merged = merged.tail(limit)
+            if end_ms:
+                merged = merged.filter(pl.col("timestamp") < end_ms)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            merged.write_parquet(path)
+            _check_gaps(merged, timeframe)
+            return merged
+
+        if verbose:
+            print("    No new candles available. Using cached data.")
+        _check_gaps(cached, timeframe)
+        return cached
+
+    # Full fetch from scratch
+    since = _parse_date_ms(start) if start else exchange.milliseconds() - limit * tf_ms
+
+    if verbose:
+        date_desc = (
+            f" from {start} to {end}"
+            if start and end
+            else f" from {start}"
+            if start
+            else f" until {end}"
+            if end
+            else ""
+        )
+        limit_desc = f"{limit} " if not start else ""
+        print(
+            f"\n[*] Fetching {limit_desc}{timeframe} candles for {symbol} "
+            f"from {exchange_id}{date_desc}..."
+        )
+
+    raw = _fetch_raw(exchange, symbol, timeframe, since, end_ms, batch, limit if use_limit else None)
+
+    # Deduplicate
+    seen: set = set()
+    unique: list = []
+    for c in raw:
+        if c[0] not in seen:
+            seen.add(c[0])
+            unique.append(c)
+
+    if end_ms:
+        unique = [c for c in unique if c[0] < end_ms]
+    if use_limit:
+        unique = unique[:limit]
+
+    df = _raw_to_df(unique)
+
+    if path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.write_parquet(path)
 
     _check_gaps(df, timeframe)
     return df

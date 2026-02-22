@@ -25,19 +25,9 @@ def _load_data(args):
         print(f"\n[*] Loading data from {args.csv}...")
         df = load_csv(args.csv, start=start, end=end)
     else:
-        date_desc = ""
-        if start and end:
-            date_desc = f" from {start} to {end}"
-        elif start:
-            date_desc = f" from {start}"
-        elif end:
-            date_desc = f" until {end}"
-        limit_desc = f"{args.limit} " if not start else ""
-        print(
-            f"\n[*] Fetching {limit_desc}{args.timeframe} candles for {args.symbol} from {args.exchange}{date_desc}..."
-        )
         df = fetch_ohlcv(
-            args.symbol, args.timeframe, args.exchange, args.limit, start=start, end=end
+            args.symbol, args.timeframe, args.exchange, args.limit,
+            start=start, end=end, verbose=True,
         )
     return df
 
@@ -132,10 +122,9 @@ defined in the Strategy file.
     parser.add_argument("--end", metavar="DATE", help="End date YYYY-MM-DD (inclusive)")
     parser.add_argument("--csv", help="Load OHLCV from CSV file instead of exchange")
     parser.add_argument("--demo", action="store_true", help="Use synthetic data (no API needed)")
-    parser.add_argument("--validate", action="store_true", help="Enable walk-forward validation")
-    parser.add_argument(
-        "--train-ratio", type=float, default=None, help="Train/test split ratio (default: 0.7)"
-    )
+    parser.add_argument("--cv", action="store_true", help="Enable purged K-fold cross-validation")
+    parser.add_argument("--cv-folds", type=int, default=None, help="Number of CV folds (default: 5)")
+    parser.add_argument("--purge-bars", type=int, default=None, help="Bars to purge at train/test boundary (default: 50)")
 
     args = parser.parse_args()
 
@@ -163,10 +152,12 @@ defined in the Strategy file.
 
     # Apply CLI overrides to strategy
     first = strategies[0]
-    if args.validate:
-        first.validate = True
-    if args.train_ratio is not None:
-        first.train_ratio = args.train_ratio
+    if args.cv:
+        first.cv = True
+    if args.cv_folds is not None:
+        first.cv_folds = args.cv_folds
+    if args.purge_bars is not None:
+        first.purge_bars = args.purge_bars
 
     t1 = time.perf_counter()
 
@@ -177,57 +168,52 @@ defined in the Strategy file.
     sort = first.sort
     top = first.top
 
-    if isinstance(results, dict):
-        # Walk-forward validation: train + test results
-        train_top = results["train"]
-        test_top = results["test"]
-        stability = results.get("stability", [])
-        split = results.get("split", 0)
-        n_bars = len(close)
+    if isinstance(results, dict) and "folds" in results:
+        # Purged K-fold CV results
+        cv_folds_used = results["cv_folds"]
+        purge_bars_used = results["purge_bars"]
+        aggregated = results["aggregated"]
+        fold_details = results["folds"]
+        n_folds_run = len(fold_details)
 
         print(f"    Done in {total_elapsed:.4f}s")
-
-        # IS table
         print(f"\n{'=' * 70}")
-        print(f"  IN-SAMPLE (TRAIN) — TOP {top} (sorted by {sort})")
+        print(f"  PURGED K-FOLD CV — {cv_folds_used} FOLDS, PURGE={purge_bars_used} BARS")
         print(f"{'=' * 70}")
-        header = f"{'#':>3} {'Strategy':<20} {'Return%':>9} {'Sharpe':>8} {'MaxDD%':>8} {'WinRate%':>9} {'Trades':>7} {'PF':>7} {'PSR':>6}  Params"
+        print(f"  AGGREGATED OOS (sorted by {sort})")
+        print(f"{'=' * 70}")
+        header = f"{'#':>3} {'Strategy':<20} {'Return%':>9} {'Sharpe':>8} {'MaxDD%':>8} {'WinRate%':>9} {'Trades':>7} {'PF':>7} {'PSR':>6} {'Cons':>6}  Params"
         print(header)
-        print("-" * len(header) + "-" * 30)
-        for i, r in enumerate(train_top[:top], 1):
+        print("-" * len(header) + "-" * 10)
+        for i, r in enumerate(aggregated[:top], 1):
             params_str = ", ".join(f"{k}={v}" for k, v in r.params.items())
+            cons_str = f"{int(round(r.cv_consistency * n_folds_run))}/{n_folds_run}"
             print(
                 f"{i:>3} {r.strategy:<20} {r.total_return_pct:>+8.2f}% "
                 f"{r.sharpe_ratio:>8.3f} {r.max_drawdown_pct:>8.2f} "
-                f"{r.win_rate_pct:>8.2f}% {r.num_trades:>7} {r.profit_factor:>7.3f} {r.psr:>6.3f}  {params_str}"
+                f"{r.win_rate_pct:>8.2f}% {r.num_trades:>7} {r.profit_factor:>7.3f} {r.psr:>6.3f} {cons_str:>6}  {params_str}"
             )
 
-        # OOS table with WFE column — IS rank order preserved, no OOS re-ranking
-        is_return_lookup = {
-            (r.strategy, tuple(sorted(r.params.items()))): r.total_return_pct for r in train_top
-        }
-        print(f"\n{'=' * 70}")
-        print("  OUT-OF-SAMPLE (TEST) — IS RANK ORDER (no OOS re-ranking)")
-        print(f"{'=' * 70}")
-        header_oos = f"{'#':>3} {'Strategy':<20} {'Return%':>9} {'Sharpe':>8} {'MaxDD%':>8} {'WinRate%':>9} {'Trades':>7} {'PF':>7} {'PSR':>6} {'WFE':>6}  Params"
-        print(header_oos)
-        print("-" * len(header_oos) + "-" * 30)
-        for i, r in enumerate(test_top[:top], 1):
-            params_str = ", ".join(f"{k}={v}" for k, v in r.params.items())
-            is_ret = is_return_lookup.get((r.strategy, tuple(sorted(r.params.items()))))
-            if is_ret is not None and is_ret > 0.0:
-                wfe_str = f"{r.total_return_pct / is_ret:>6.2f}"
-            else:
-                wfe_str = f"{'N/A':>6}"
-            print(
-                f"{i:>3} {r.strategy:<20} {r.total_return_pct:>+8.2f}% "
-                f"{r.sharpe_ratio:>8.3f} {r.max_drawdown_pct:>8.2f} "
-                f"{r.win_rate_pct:>8.2f}% {r.num_trades:>7} {r.profit_factor:>7.3f} {r.psr:>6.3f} {wfe_str}  {params_str}"
-            )
+        print("\n  FOLD DETAILS")
+        for fd in fold_details:
+            tr0, tr1 = fd["train_range"]
+            ts0, ts1 = fd["test_range"]
+            wfe_fold = fd.get("wfe")
+            wfe_str = f"  WFE={wfe_fold:.3g}x" if wfe_fold is not None else ""
+            print(f"  Fold {fd['fold']}: train=[{tr0}:{tr1}]  test=[{ts0}:{ts1}]{wfe_str}")
+            if fd["train_top"]:
+                best_is = fd["train_top"][0]
+                is_params = ", ".join(f"{k}={v}" for k, v in best_is.params.items())
+                print(f"    IS top-1: {is_params} | Sharpe={best_is.sharpe_ratio:.3f}")
+            if fd["test_results"]:
+                ranked_oos = rank_results(fd["test_results"], sort_by=sort)
+                best_oos = ranked_oos[0]
+                oos_params = ", ".join(f"{k}={v}" for k, v in best_oos.params.items())
+                print(f"    OOS best: {oos_params} | Return={best_oos.total_return_pct:+.2f}%  Sharpe={best_oos.sharpe_ratio:.3f}")
 
-        # Parameter stability section
+        stability = results.get("stability", [])
         if stability:
-            print("\n  PARAMETER STABILITY (top-1 as IS window expands)")
+            print(f"\n  PARAMETER STABILITY (top-1 as last-fold IS expands into OOS)")
             baseline_params = stability[0][1]
             agree_count = 0
             for j, (tr_end, params, sharpe) in enumerate(stability):
@@ -241,37 +227,12 @@ defined in the Strategy file.
                 else:
                     marker = "<- changed"
                 print(
-                    f"    {tr_end} bars ({tr_end * 100 / n_bars:.0f}%): {params_str} -- Sharpe {sharpe:.3f}  {marker}"
+                    f"    {tr_end} bars ({tr_end * 100 / len(close):.0f}%): {params_str} -- Sharpe {sharpe:.3f}  {marker}"
                 )
             print(f"    Stability: {agree_count}/{len(stability)} windows agree with IS winner")
 
-        # Best strategy summary
-        if train_top:
-            best_is = train_top[0]
-            best_oos = None
-            best_key = (best_is.strategy, tuple(sorted(best_is.params.items())))
-            for r in test_top:
-                if (r.strategy, tuple(sorted(r.params.items()))) == best_key:
-                    best_oos = r
-                    break
-            print(f"\n{'=' * 70}")
-            print(f"  BEST STRATEGY: {best_is.strategy}")
-            print(f"  Params: {best_is.params}")
-            print(
-                f"  IS  Return: {best_is.total_return_pct:>+8.2f}% | Sharpe: {best_is.sharpe_ratio:.3f} | MaxDD: {best_is.max_drawdown_pct:.2f}%"
-            )
-            if best_oos:
-                wfe_str = (
-                    f"{best_oos.total_return_pct / best_is.total_return_pct:.2f}x"
-                    if best_is.total_return_pct > 0.0
-                    else "N/A"
-                )
-                print(
-                    f"  OOS Return: {best_oos.total_return_pct:>+8.2f}% | Sharpe: {best_oos.sharpe_ratio:.3f} | MaxDD: {best_oos.max_drawdown_pct:.2f}%  WFE: {wfe_str}"
-                )
-
-        print(f"\n  IS bars: {split} | OOS bars: {n_bars - split}")
-        print(f"  Full-period Buy & Hold: {buy_hold_pct:+.2f}%")
+        print(f"\n  Buy & Hold: {buy_hold_pct:+.2f}%")
+        print(f"{'=' * 70}")
     else:
         n_results = len(results)
         print(
