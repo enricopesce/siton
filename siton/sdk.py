@@ -1614,6 +1614,7 @@ class Strategy:
         slippage=0.05,
         capital=10000.0,
         fraction=1.0,
+        risk_per_trade=None,
         top=10,
         sort="sharpe_ratio",
         long_only=False,
@@ -1643,6 +1644,7 @@ class Strategy:
         self.slippage = slippage
         self.capital = capital
         self.fraction = fraction
+        self.risk_per_trade = float(risk_per_trade) if risk_per_trade is not None else 0.0
         self.top = top
         self.sort = sort
         self.long_only = long_only
@@ -1702,6 +1704,7 @@ def _attach_equity_curves(
     long_only,
     bar_offset=0,
     atr_arr=None,
+    risk_per_trade=0.0,
 ):
     """Attach equity curves to ranked results; regenerates each signal on-demand."""
     pm_keys = {"stop_loss", "take_profit", "trailing_stop"}
@@ -1738,6 +1741,7 @@ def _attach_equity_curves(
                 sl_m,
                 tp_m,
                 trail_m,
+                risk_per_trade,
             )
         elif use_managed:
             sl_v = r.params.get("stop_loss", 0.0) / 100.0 if "stop_loss" in r.params else 0.0
@@ -1761,6 +1765,7 @@ def _attach_equity_curves(
                 sl_v,
                 tp_v,
                 trail_v,
+                risk_per_trade,
             )
         else:
             r.equity_curve = backtest_one_equity(
@@ -1796,6 +1801,7 @@ def _run_batch(
     use_managed,
     combo_indices=None,
     atr_arr=None,
+    risk_per_trade=0.0,
 ):
     """Run backtests for given combos. If combo_indices is given, only run those."""
     if combo_indices is not None:
@@ -1860,6 +1866,7 @@ def _run_batch(
             sl_mult_arr_,
             tp_mult_arr_,
             trail_mult_arr_,
+            risk_per_trade,
         )
 
         results = []
@@ -1960,6 +1967,7 @@ def _run_batch(
             sl_arr,
             tp_arr,
             trail_arr,
+            risk_per_trade,
         )
 
         results = []
@@ -2022,6 +2030,7 @@ def run(
     slippage = slippage if slippage is not None else strat.slippage
     capital = capital if capital is not None else strat.capital
     fraction = fraction if fraction is not None else strat.fraction
+    risk_per_trade = strat.risk_per_trade
     top = top if top is not None else strat.top
     sort = sort if sort is not None else strat.sort
 
@@ -2119,6 +2128,7 @@ def run(
             rf_per_bar,
             use_managed,
             atr_arr=is_atr,
+            risk_per_trade=risk_per_trade,
         )
         train_top = rank_results(is_results, sort_by=sort)[:top]
 
@@ -2158,6 +2168,7 @@ def run(
             rf_per_bar,
             use_managed,
             atr_arr=oos_atr,
+            risk_per_trade=risk_per_trade,
         )
 
         # Match OOS results back to IS winners by full params — no re-ranking
@@ -2201,6 +2212,7 @@ def run(
                     rf_per_bar,
                     use_managed,
                     atr_arr=win_atr,
+                    risk_per_trade=risk_per_trade,
                 )
                 win_ranked = rank_results(win_results, sort_by=sort)
                 if win_ranked:
@@ -2231,6 +2243,7 @@ def run(
             atr_arr=np.ascontiguousarray(atr_arr_full[:split])
             if atr_arr_full is not None
             else None,
+            risk_per_trade=risk_per_trade,
         )
 
         _attach_equity_curves(
@@ -2255,6 +2268,7 @@ def run(
             atr_arr=np.ascontiguousarray(atr_arr_full[split:])
             if atr_arr_full is not None
             else None,
+            risk_per_trade=risk_per_trade,
         )
 
         # Step 5 — DSR
@@ -2282,6 +2296,7 @@ def run(
         rf_per_bar,
         use_managed,
         atr_arr=atr_arr_full,
+        risk_per_trade=risk_per_trade,
     )
 
     ranked = rank_results(all_results, sort_by=sort)[:top]
@@ -2305,6 +2320,7 @@ def run(
         name_to_strat_idx,
         long_only,
         atr_arr=atr_arr_full,
+        risk_per_trade=risk_per_trade,
     )
     deflated_sharpe_ratio(ranked, n_bars)
     global _last_n_combos
