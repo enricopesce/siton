@@ -362,127 +362,492 @@ The function must return a `float64` array with values in `{-1.0, 0.0, +1.0}`.
 
 ## 6. Signal Composition Operators
 
-Signals can be combined using Python operators and method calls. All compositions
-merge the parameter grids flat, producing the full cartesian product.
+This is the heart of the SDK. Once you have individual indicator signals, you
+wire them together with operators to express your trading logic in plain,
+readable code. Siton provides eight operators, each capturing a distinct
+real-world concept: confirmation, fallback, negation, gating, directional
+agreement, temporal confirmation, voting, and inversion.
 
-### 6.1 `&` — AND (Both Must Agree)
+### What "composition" means
 
-Both signals must point in the **same direction**. Any disagreement or neutral
-signal produces `0`.
+Every indicator returns a ternary array — a value of `+1`, `0`, or `-1` for
+every bar in your dataset. Composition takes two (or more) of those arrays and
+combines them bar-by-bar to produce a new array. The result is itself a `Signal`
+object, so you can keep chaining operators indefinitely.
 
 ```
-long + long  = long
-short + short = short
-long + short  = flat
-long + flat   = flat
-flat + flat   = flat
+bar 1   bar 2   bar 3   bar 4   bar 5  ...
+  +1      +1      0       -1      +1       ← EMA crossover
+  +1       0      0       -1       0       ← MACD signal
+  +1       0      0       -1       0       ← EMA & MACD  (both must agree)
 ```
+
+All compositions also **merge the parameter grids**. If EMA has 4 combos and
+MACD has 2, the composed signal has 4 × 2 = 8 combos. Every combination is
+backtested independently.
+
+---
+
+### 6.1 `&` — AND: Both Must Agree
+
+**What it means:** Only trade when two independent indicators point in the same
+direction. If either one is silent or they disagree, stay flat.
+
+**When to use it:** Adding a confirmation layer. You have a trend signal but
+you only want to act when a momentum indicator also agrees — reducing false
+entries on choppy markets.
+
+**Bar-by-bar logic:**
+
+| Signal A | Signal B | Result |
+|----------|----------|--------|
+| +1 (long)  | +1 (long)  | +1 (long) |
+| -1 (short) | -1 (short) | -1 (short) |
+| +1 (long)  | -1 (short) | 0 (flat — conflict) |
+| +1 (long)  |  0 (flat)  | 0 (flat — A alone is not enough) |
+| -1 (short) |  0 (flat)  | 0 (flat) |
+|  0 (flat)  |  0 (flat)  | 0 (flat) |
+
+**Example — require trend and momentum to agree:**
 
 ```python
-# EMA trend AND MACD momentum — both must be bullish to go long
-confluence = ema_cross(fast=[8, 12], slow=[26, 50]) & macd_signal(fast=[12], slow=[26], signal_period=[9])
+from siton.sdk import ema_cross, macd_signal
+
+trend    = ema_cross(fast=[8, 12], slow=[26, 50])   # 4 combos
+momentum = macd_signal(fast=[12], slow=[26], signal_period=[9])  # 1 combo
+
+# Only go long when BOTH EMA is bullish AND MACD is above its signal line
+confluence = trend & momentum   # 4 × 1 = 4 backtests
 ```
 
-### 6.2 `|` — OR (First Non-Flat Wins)
-
-Takes the first non-zero signal. If both are non-zero and **conflict** (one long,
-one short), the result is flat.
-
-```
-long + flat   = long   (trend arm active, mr arm silent)
-flat + long   = long   (mr arm active, trend arm silent)
-long + short  = flat   (conflict)
-flat + flat   = flat
-```
-
-This is the key operator for **mutually exclusive regime arms**:
+**Chaining multiple `&` operators:**
 
 ```python
-# When ADX gates are complementary, only one arm can fire
-combined = trend_arm | mean_reversion_arm
+# All three must agree — each added & halves the number of signals that pass
+signal = ema_cross(fast=[12], slow=[50]) & macd_signal(fast=[12], slow=[26], signal_period=[9]) & obv(ma_periods=[20])
 ```
 
-### 6.3 `~` — Invert to Binary Filter
+> **Tip for beginners:** `&` makes your strategy more selective. Fewer trades
+> will fire, but each one has more evidence behind it. If your strategy is
+> generating too many bad trades, add another `&` condition.
 
-`~signal` converts a signal to a **binary gate**: outputs `1` wherever the
-original signal is `0` (flat), and `0` elsewhere.
+---
 
-This is **not** long-to-short inversion. It means "NOT in an extreme zone":
+### 6.2 `|` — OR: First Non-Flat Wins
+
+**What it means:** Use signal A if it has an opinion; otherwise fall back to
+signal B. If both are active but disagree, stay flat (treat the conflict as
+uncertainty).
+
+**When to use it:** Building **mutually exclusive regime arms**. If you have a
+trend-following strategy and a mean-reversion strategy, and you want exactly one
+of them active at any time, gate each arm with an ADX filter and combine with
+`|`.
+
+**Bar-by-bar logic:**
+
+| Signal A | Signal B | Result | Reason |
+|----------|----------|--------|--------|
+| +1 (long)  |  0 (flat)  | +1 | A has opinion, B is silent |
+|  0 (flat)  | +1 (long)  | +1 | A is silent, B takes over |
+| -1 (short) |  0 (flat)  | -1 | A has opinion, B is silent |
+|  0 (flat)  | -1 (short) | -1 | A is silent, B takes over |
+| +1 (long)  | -1 (short) |  0 | Both active but conflict — stay flat |
+| -1 (short) | +1 (long)  |  0 | Both active but conflict — stay flat |
+|  0 (flat)  |  0 (flat)  |  0 | Neither has opinion |
+
+**Example — two regime arms that can never both fire:**
 
 ```python
-# rsi() fires +1 when oversold, -1 when overbought
-# ~rsi()  fires +1 when NEUTRAL (not at extremes), 0 when overbought/oversold
-rsi_neutral = ~rsi(periods=[14], oversold=[30], overbought=[70])
+from siton.sdk import ema_cross, macd_signal, bollinger_bands, rsi, adx
 
-# Gate trend through neutral RSI zone
-safe_trend = trend.filter_by(rsi_neutral)
+# Gate each arm with complementary ADX filters
+trending = adx(periods=[14], thresholds=[25])   # non-zero when ADX > 25
+ranging  = ~adx(periods=[14], thresholds=[25])  # non-zero when ADX ≤ 25
+
+trend_arm = (ema_cross(fast=[8, 13], slow=[55, 89]) & macd_signal(fast=[12], slow=[26], signal_period=[9])).filter_by(trending)
+mr_arm    = (bollinger_bands(windows=[20], num_std=[2.0]) & rsi(periods=[14], oversold=[30], overbought=[70])).filter_by(ranging)
+
+# When ADX > 25: only trend_arm can fire (mr_arm is silenced by its gate)
+# When ADX ≤ 25: only mr_arm can fire (trend_arm is silenced by its gate)
+# The two arms are structurally mutually exclusive
+combined = trend_arm | mr_arm
 ```
 
-To algebraically invert long ↔ short, use `.negate()`.
+> **Tip for beginners:** Think of `|` as a selector switch. `trend_arm | mr_arm`
+> reads as "use the trend strategy, or if it has nothing to say, use the
+> mean-reversion strategy instead". When paired with proper ADX gating, exactly
+> one arm fires on every bar.
 
-### 6.4 `.filter_by(other)` — Gate a Signal
+---
 
-The primary signal passes through only where `other` is **non-zero** (active).
-The direction of `other` does not need to match.
+### 6.3 `~` — Invert to Binary Gate
+
+**What it means:** Produce a binary "permission" signal that is `+1` wherever
+the original signal is **flat (0)**, and `0` everywhere else.
+
+**Critical distinction — this is NOT a long/short flip:**
+
+| Original | `~` result | Meaning |
+|----------|-----------|---------|
+| +1 (long)  | 0 | "not allowed" (indicator is active, so gate is closed) |
+| -1 (short) | 0 | "not allowed" (indicator is active, so gate is closed) |
+|  0 (flat)  | 1 | "allowed" (indicator is quiet, so gate is open) |
+
+`~` answers the question: **"Is this indicator currently calm or neutral?"**
+
+It is designed to be used directly inside `.filter_by()`. The idiomatic pattern
+is `signal.filter_by(~oscillator(...))`, which reads as: "trade this signal only
+when the oscillator is NOT at an extreme".
+
+**Example — avoid entering during overbought/oversold conditions:**
 
 ```python
-# trend fires only when ADX > 25 (strong trend confirmed)
-gated = trend.filter_by(adx(periods=[14], thresholds=[25]))
+from siton.sdk import ema_cross, rsi
+
+trend = ema_cross(fast=[8, 12], slow=[26, 50])
+
+# rsi() fires +1 when oversold (< 30), -1 when overbought (> 70), 0 when neutral
+# ~rsi() fires +1 when NEUTRAL, 0 when at extremes
+rsi_calm = ~rsi(periods=[14], oversold=[30], overbought=[70])
+
+# Only take trend trades when RSI is in the neutral zone
+safe_trend = trend.filter_by(rsi_calm)
 ```
 
-### 6.5 `.agree(other)` — Directional Gate
-
-Stricter than `.filter_by()`: the primary signal passes only where `other` agrees
-on **direction** (both long, or both short).
+**Example — range gate (inverse of ADX):**
 
 ```python
-# Signal passes only where volume confirms the same direction
-volume_confirmed = signal.agree(obv(ma_periods=[20]))
+from siton.sdk import adx
+
+# adx() fires when the market IS trending
+# ~adx() fires when the market is NOT trending (ranging / flat)
+ranging = ~adx(periods=[14], thresholds=[25])
+
+# Mean-reversion strategy only active in ranging markets
+mr_signal = bollinger_bands(windows=[20], num_std=[2.0]).filter_by(ranging)
 ```
 
-### 6.6 `.confirm(other, lookbacks)` — Lookback Confirmation
+> **Common mistake:** `~signal` does NOT mean "go short when you would go long".
+> For that, use `.negate()`. The `~` operator is purely a gate: it tells other
+> signals whether they are allowed to fire.
 
-Signal is valid only if `other` fired in the **same direction** within the last
-`N` bars. Adds a `lookback` dimension to the grid.
+**If you want to use `~` for long/short inversion (rare):**
 
 ```python
-# EMA trend valid only if MACD agreed within 3, 5, or 8 bars
-confirmed = ema_cross(fast=[12], slow=[50]).confirm(
-    macd_signal(fast=[12], slow=[26], signal_period=[9]),
-    lookbacks=(3, 5, 8),
+# This would flip a trend signal into a contrarian signal
+contrarian = trend.negate()   # use .negate(), NOT ~
+```
+
+---
+
+### 6.4 `.filter_by(other)` — Activity Gate
+
+**What it means:** The primary signal passes through unchanged wherever `other`
+is **non-zero**. Where `other` is flat (`0`), the primary signal is suppressed
+to `0` regardless of what it says.
+
+**Key point:** `.filter_by()` does **not** check direction. As long as `other`
+has any opinion (long or short), the primary signal is allowed through.
+
+| Primary signal | Gate (other) | Result |
+|----------------|--------------|--------|
+| +1 | +1 | +1 (primary passes) |
+| +1 | -1 | +1 (primary passes — gate is non-zero regardless of direction) |
+| +1 |  0 | 0  (primary suppressed — gate is flat) |
+| -1 | +1 | -1 (primary passes) |
+| -1 | -1 | -1 (primary passes) |
+| -1 |  0 | 0  (primary suppressed) |
+|  0 | anything | 0  (primary was already flat) |
+
+**When to use it:** Regime filters. You want a trend signal to be active only
+when the market is in trend mode, or a mean-reversion signal to be active only
+when the market is ranging.
+
+```python
+from siton.sdk import ema_cross, adx
+
+# ADX fires (+1 or -1) when a trend is strong enough
+# ema_cross is allowed through only during those bars
+gated = ema_cross(fast=[8, 12], slow=[26, 50]).filter_by(
+    adx(periods=[14], thresholds=[20, 25])
 )
 ```
 
-### 6.7 `Signal.majority(*signals)` — Majority Vote
-
-More than half of the supplied signals must agree on direction.
+**Chaining multiple `.filter_by()` calls:**
 
 ```python
-# At least 2 out of 3 indicators must agree
+# Three independent gates: all must be non-zero for the signal to pass
+signal = (
+    ema_cross(fast=[12], slow=[50])
+    .filter_by(adx(periods=[14], thresholds=[25]))   # trending market
+    .filter_by(~rsi(periods=[14], oversold=[30], overbought=[70]))  # RSI not extreme
+    .filter_by(obv(ma_periods=[20]))                 # volume confirms
+)
+```
+
+> **`.filter_by()` vs `&`:** Both restrict when trades fire. The difference is
+> subtle but important. `a & b` requires A and B to agree on **direction** —
+> if A is long and B is short, the result is flat. `a.filter_by(b)` only checks
+> whether B is active at all — it lets A's direction through regardless of B's
+> direction. For regime filters (ADX, volume), use `.filter_by()`. For
+> directional confirmation (MACD confirming EMA), use `&`.
+
+---
+
+### 6.5 `.agree(other)` — Directional Gate
+
+**What it means:** Like `.filter_by()`, but stricter: the primary signal only
+passes where `other` is non-zero **AND pointing the same direction**.
+
+| Primary | Other | `.filter_by()` | `.agree()` |
+|---------|-------|---------------|-----------|
+| +1 | +1 | +1 | +1 |
+| +1 | -1 | +1 | 0  ← suppressed (directions differ) |
+| +1 |  0 |  0 |  0 |
+| -1 | -1 | -1 | -1 |
+| -1 | +1 | -1 |  0 ← suppressed (directions differ) |
+| -1 |  0 |  0 |  0 |
+
+**When to use it:** When you want a confirmation indicator to not only be active
+but to specifically agree with the direction you are trading. This is more
+conservative than `.filter_by()`.
+
+```python
+from siton.sdk import ema_cross, di_cross
+
+# +DI vs -DI cross: +1 when buyers dominate, -1 when sellers dominate
+# Only allow EMA signals where DI cross agrees on direction
+directional = ema_cross(fast=[8, 12], slow=[26, 50]).agree(
+    di_cross(periods=[14])
+)
+```
+
+**Practical difference — when to choose `.agree()` over `.filter_by()`:**
+
+```python
+trend = ema_cross(fast=[12], slow=[50])
+volume = obv(ma_periods=[20])
+
+# .filter_by(volume): goes long when EMA is bullish AND OBV is active (any direction)
+# Allows long EMA + bearish OBV → might be wrong
+trend.filter_by(volume)
+
+# .agree(volume): goes long only when EMA is bullish AND OBV is also bullish
+# More conservative — both must point the same way
+trend.agree(volume)
+```
+
+> **Tip:** Use `.agree()` when the secondary indicator is genuinely directional
+> (volume flow, DI cross). Use `.filter_by()` when the secondary indicator is a
+> regime marker (ADX, ATR expansion) whose direction does not map to trade
+> direction.
+
+---
+
+### 6.6 `.confirm(other, lookbacks)` — Lookback Confirmation
+
+**What it means:** The primary signal is accepted only if `other` fired in the
+**same direction** within the last `N` bars. This introduces a tolerance window:
+the confirmation does not have to happen on the exact same bar — it just needs
+to have happened recently.
+
+`lookbacks` is a tuple of values to sweep as part of the backtest grid.
+
+**How it works bar by bar:**
+
+```
+Bar 10:  MACD = +1   (MACD fires long)
+Bar 11:  MACD =  0
+Bar 12:  MACD =  0
+Bar 13:  EMA  = +1   (EMA fires long)
+         lookback=5 → checks bars 8-12 for MACD long → bar 10 qualifies ✓ → EMA accepted
+Bar 14:  EMA  = +1
+         lookback=3 → checks bars 11-13 → MACD was 0, 0, 0 → EMA rejected ✗
+```
+
+```python
+from siton.sdk import ema_cross, macd_signal
+
+# EMA crossover is accepted only if MACD was bullish at some point in the
+# last 3, 5, or 8 bars (each lookback value is a separate backtest combo)
+confirmed = ema_cross(fast=[8, 12], slow=[26, 50]).confirm(
+    macd_signal(fast=[12], slow=[26], signal_period=[9]),
+    lookbacks=(3, 5, 8),
+)
+# Grid: 4 EMA combos × 1 MACD combo × 3 lookbacks = 12 backtests
+```
+
+**When to use it:** When two indicators rarely fire on exactly the same bar but
+you still want them to be "recently in sync". A crossover system and a momentum
+oscillator often lead/lag each other by a few bars.
+
+> **Tip:** Smaller lookback values (3–5) enforce stricter recency. Larger values
+> (8–13) allow more lag between the two indicators but increase the risk of
+> stale confirmations. Sweeping lookbacks lets the optimizer find the right
+> tolerance.
+
+---
+
+### 6.7 `Signal.majority(*signals)` — Majority Vote
+
+**What it means:** Supply three or more signals and take a trade only when
+**more than half** vote in the same direction.
+
+This is a robust alternative to chaining multiple `&` operators. With `&`, a
+single neutral indicator blocks every trade. With `majority()`, one neutral
+indicator is outvoted by the others.
+
+**Voting rules (example with 3 signals):**
+
+| A  | B  | C  | `&` chain | `majority()` |
+|----|----|----|-----------|--------------|
+| +1 | +1 | +1 | +1 | +1 |
+| +1 | +1 |  0 |  0 | +1 ← majority wins |
+| +1 |  0 |  0 |  0 |  0 (no majority) |
+| +1 | -1 |  0 |  0 |  0 (tie) |
+| +1 | +1 | -1 |  0 | +1 ← 2 vs 1 |
+
+```python
+from siton.sdk import ema_cross, rsi, macd_signal, Signal, Strategy, backtest
+
+# At least 2 of 3 indicators must agree
 signal = Signal.majority(
     ema_cross(fast=[12], slow=[50]),
     rsi(periods=[14], oversold=[30], overbought=[70]),
     macd_signal(fast=[12], slow=[26], signal_period=[9]),
 )
+
+STRATEGY = Strategy("MajorityVote", signal=signal, top=10)
 ```
 
-### 6.8 `.negate()` — Algebraic Inversion
+**With 5 signals (3 out of 5 required):**
 
-Flips long ↔ short: `+1 → -1`, `-1 → +1`, `0 → 0`. Rarely needed directly;
-usually `~` (where-flat) is what you want.
+```python
+signal = Signal.majority(
+    ema_cross(fast=[12], slow=[50]),
+    macd_signal(fast=[12], slow=[26], signal_period=[9]),
+    rsi(periods=[14], oversold=[30], overbought=[70]),
+    obv(ma_periods=[20]),
+    adx(periods=[14], thresholds=[25]),
+)
+# 3 out of 5 must agree on direction
+```
 
-### Operator summary table
+> **`&` vs `majority()` — when to choose which:**
+>
+> - Use `&` when every indicator in the chain is genuinely required as a
+>   necessary condition (e.g., trend + regime filter + volume).
+> - Use `majority()` when you have several loosely correlated indicators and
+>   want a democratic consensus rather than a strict requirement — it tolerates
+>   one dissenter.
 
-| Expression | Semantics |
-|-----------|-----------|
-| `a & b` | Both agree |
-| `a \| b` | First non-flat wins; conflict → flat |
-| `~a` | Binary gate: 1 where a is flat |
-| `a.filter_by(b)` | a passes where b is non-zero |
-| `a.agree(b)` | a passes where b agrees on direction |
-| `a.confirm(b, lookbacks)` | a passes where b fired same direction within N bars |
-| `Signal.majority(a, b, c)` | Direction majority vote |
-| `a.negate()` | Long ↔ short swap |
+---
+
+### 6.8 `.negate()` — Algebraic Inversion (Long ↔ Short Swap)
+
+**What it means:** Flips the direction of every bar: long becomes short, short
+becomes long, flat stays flat.
+
+| Original | `.negate()` |
+|----------|-------------|
+| +1 (long)  | -1 (short) |
+| -1 (short) | +1 (long) |
+|  0 (flat)  |  0 (flat) |
+
+**When to use it:** Building contrarian strategies, or reversing an exit signal
+for use as an entry.
+
+```python
+from siton.sdk import ema_cross, rsi
+
+# Standard trend follower
+trend = ema_cross(fast=[12], slow=[50])
+
+# Contrarian: short when trend says long, long when trend says short
+contrarian = trend.negate()
+
+# RSI mean-reversion signal: +1 when oversold (buy dip)
+# Negate it to get: +1 when overbought (momentum continuation) — rare use case
+overbought_momentum = rsi(periods=[14], oversold=[30], overbought=[70]).negate()
+```
+
+> **`.negate()` vs `~`:** These are completely different.
+>
+> - `~signal` — "where is this indicator NOT active?" → binary gate, always outputs 0 or +1
+> - `signal.negate()` — "flip the trade direction" → always outputs 0, +1, or -1
+
+---
+
+### 6.9 Chaining Operators — Building Complex Logic
+
+All operators return a `Signal` object, so they chain freely. Reading left to
+right, each operator applies to the result of everything before it.
+
+**Example — full strategy built step by step:**
+
+```python
+from siton.sdk import ema_cross, macd_signal, adx, rsi, obv
+
+# Step 1: Base trend signal
+trend = ema_cross(fast=[8, 12, 21], slow=[55, 89, 144])
+
+# Step 2: Require MACD to agree on direction
+trend_confirmed = trend & macd_signal(fast=[12], slow=[26], signal_period=[9])
+
+# Step 3: Only trade when ADX says the market is in trend mode
+trend_in_regime = trend_confirmed.filter_by(adx(periods=[14], thresholds=[25]))
+
+# Step 4: Block entries when RSI is at an extreme (overbought/oversold)
+trend_safe = trend_in_regime.filter_by(~rsi(periods=[14], oversold=[30], overbought=[70]))
+
+# Step 5: Require volume to confirm
+final_signal = trend_safe.filter_by(obv(ma_periods=[20]))
+```
+
+This reads naturally: "Take a trend trade when EMA and MACD agree, the market is
+trending (ADX), RSI is not at an extreme, and volume is confirming."
+
+**Equivalent one-liner (less readable but identical result):**
+
+```python
+signal = (
+    ema_cross(fast=[8, 12, 21], slow=[55, 89, 144])
+    & macd_signal(fast=[12], slow=[26], signal_period=[9])
+).filter_by(adx(periods=[14], thresholds=[25]))
+ .filter_by(~rsi(periods=[14], oversold=[30], overbought=[70]))
+ .filter_by(obv(ma_periods=[20]))
+```
+
+---
+
+### 6.10 Quick-Reference: When to Use Which Operator
+
+| You want to... | Use |
+|---------------|-----|
+| Require two indicators to agree on direction | `a & b` |
+| Switch between two strategy arms | `a \| b` |
+| Block trades when an oscillator is at extreme | `.filter_by(~oscillator(...))` |
+| Allow trades only during a specific regime | `.filter_by(regime_indicator)` |
+| Require a second indicator to also agree directionally | `.agree(other)` |
+| Accept a signal if another fired recently (within N bars) | `.confirm(other, lookbacks)` |
+| Take a trade when most of several indicators agree | `Signal.majority(a, b, c, ...)` |
+| Build a contrarian / opposite strategy | `.negate()` |
+
+### 6.11 Full Operator Truth Table
+
+```
+a    b    a & b    a | b    ~a    a.filter_by(b)    a.agree(b)
++1   +1     +1      +1       0         +1                +1
++1   -1      0       0       0         +1                 0
++1    0      0      +1       0          0                 0
+-1   +1      0       0       1         -1                 0
+-1   -1     -1      -1       1         -1                -1
+-1    0      0      -1       1          0                 0
+ 0   +1      0      +1       1          0                 0
+ 0   -1      0      -1       1          0                 0
+ 0    0      0       0       1          0                 0
+```
 
 ---
 
