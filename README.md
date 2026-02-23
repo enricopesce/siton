@@ -77,7 +77,7 @@ Buy & Hold: +42.3%  |  Best Alpha: +42.0%
 |---|---|
 | Fluent API | Chain indicators with `&`, `\|`, `~`, `.filter_by()`, `.confirm()` |
 | Parallel engine | Numba JIT, `prange` across all CPU cores |
-| Walk-forward validation | Expanding IS windows, PSR/DSR overfitting detection |
+| Purged K-fold CV | K independent OOS estimates, `cv_consistency` overfitting detection, PSR/DSR |
 | 25+ indicators | Trend, momentum, oscillators, volume, volatility, candlestick patterns |
 | ATR-adaptive stops | Position sizing that adapts to market volatility |
 | Flexible data | CCXT (100+ exchanges), CSV, or built-in synthetic OHLCV generator |
@@ -214,10 +214,10 @@ STRATEGY = Strategy(
     top=10,           # show top N combos
     sort="sharpe",    # rank by: sharpe | return | sortino | calmar | profit_factor
 
-    # --- Walk-forward validation ---
-    validate=True,
-    train_ratio=0.7,
-    n_splits=5,
+    # --- Purged K-fold cross-validation ---
+    cv=True,
+    cv_folds=5,
+    purge_bars=50,
 )
 ```
 
@@ -318,7 +318,7 @@ my_signal = custom(
 
 ## Example Strategies
 
-The `examples/` directory contains six progressively complex strategies:
+The `examples/` directory contains eight progressively complex strategies:
 
 | File | Level | Combos | Concept |
 |---|---|---|---|
@@ -326,8 +326,10 @@ The `examples/` directory contains six progressively complex strategies:
 | [`02_rsi_filtered_trend.py`](examples/02_rsi_filtered_trend.py) | Easy | 32 | EMA trend filtered by RSI |
 | [`03_trend_momentum_confluence.py`](examples/03_trend_momentum_confluence.py) | Intermediate | 16 | EMA + MACD + ADX confluence |
 | [`04_entry_exit_with_stops.py`](examples/04_entry_exit_with_stops.py) | Advanced | 55 296 | Regime-adaptive: trend vs mean-reversion arms |
-| [`05_entry_exit_with_atr_stops.py`](examples/05_entry_exit_with_atr_stops.py) | Advanced | 55 296 | Same as above, ATR-normalized stops |
-| [`05_multi_strategy_walkforward.py`](examples/05_multi_strategy_walkforward.py) | Expert | varies | Multi-strategy walk-forward comparison |
+| [`05_entry_exit_with_atr_stops.py`](examples/05_entry_exit_with_atr_stops.py) | Advanced | 55 296 | ATR-normalized stops |
+| [`05_multi_strategy_walkforward.py`](examples/05_multi_strategy_walkforward.py) | Expert | varies | Multi-strategy purged K-fold CV comparison |
+| [`06_risk_per_trade_sizing.py`](examples/06_risk_per_trade_sizing.py) | Advanced | varies | ATR-based risk-per-trade position sizing |
+| [`07_purged_kfold_cv.py`](examples/07_purged_kfold_cv.py) | Expert | 12 | Purged K-fold cross-validation walkthrough |
 
 Run any example with:
 
@@ -357,9 +359,10 @@ Output:
   --top N             Show top N results (default: 10)
   --sort METRIC       Sort by: sharpe | return | sortino | calmar | profit_factor
 
-Validation:
-  --validate          Enable walk-forward validation
-  --train-ratio       Fraction of data for training (default: 0.7)
+Cross-validation:
+  --cv                Enable purged K-fold cross-validation
+  --cv-folds N        Number of CV folds (default: 5)
+  --purge-bars N      Bars to purge at train/test boundary (default: 50)
 ```
 
 ---

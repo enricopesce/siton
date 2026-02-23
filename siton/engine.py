@@ -42,6 +42,7 @@ class Result:
     sortino_ratio: float = 0.0
     calmar_ratio: float = 0.0
     psr: float = 0.0
+    cv_consistency: float = 0.0   # fraction of CV folds with OOS sharpe > 0 (0 when not using CV)
 
 
 @nb.njit(cache=True, error_model="numpy")
@@ -326,6 +327,7 @@ def _backtest_one_managed(
     sl_pct,
     tp_pct,
     trail_pct,
+    risk_per_trade,
 ):
     """Single backtest with portfolio tracking + position management + trade-level metrics."""
     cash = initial_capital
@@ -409,7 +411,11 @@ def _backtest_one_managed(
             if cur_sig != 0.0 and equity_now > 0.0:
                 trade_entry_equity = cash
                 in_trade = True
-                trade_value = equity_now * fraction
+                if risk_per_trade > 0.0 and sl_pct > 0.0:
+                    trade_value = equity_now * risk_per_trade / sl_pct
+                    trade_value = min(trade_value, equity_now * fraction)
+                else:
+                    trade_value = equity_now * fraction
                 if cur_sig > 0.0:
                     # BUG-01 fix: fee embedded in share price, spend exactly trade_value
                     fill = open_arr[i] * slip_buy
@@ -508,7 +514,11 @@ def _backtest_one_managed(
             if equity_now > 0.0:
                 trade_entry_equity = cash
                 in_trade = True
-                trade_value = equity_now * fraction
+                if risk_per_trade > 0.0 and sl_pct > 0.0:
+                    trade_value = equity_now * risk_per_trade / sl_pct
+                    trade_value = min(trade_value, equity_now * fraction)
+                else:
+                    trade_value = equity_now * fraction
                 if cur_sig > 0.0:
                     # BUG-01 fix: fee embedded in share price, spend exactly trade_value
                     fill = close[i] * slip_buy
@@ -634,6 +644,7 @@ def backtest_batch_managed(
     sl_arr,
     tp_arr,
     trail_arr,
+    risk_per_trade,
 ):
     """Run ALL managed backtests in parallel across CPU cores.
 
@@ -654,6 +665,7 @@ def backtest_batch_managed(
         sl_arr: 1D float64 array (N_combos,) stop-loss pct per combo.
         tp_arr: 1D float64 array (N_combos,) take-profit pct per combo.
         trail_arr: 1D float64 array (N_combos,) trailing stop pct per combo.
+        risk_per_trade: fraction of equity to risk per trade (0 = disabled).
 
     Returns:
         2D array (N_combos x 8) of metrics per combo.
@@ -681,6 +693,7 @@ def backtest_batch_managed(
             sl_arr[c],
             tp_arr[c],
             trail_arr[c],
+            risk_per_trade,
         )
         out[c, 0] = r0
         out[c, 1] = r1
@@ -718,6 +731,7 @@ def _backtest_one_atr_managed(
     sl_mult,
     tp_mult,
     trail_mult,
+    risk_per_trade,
 ):
     """Single backtest with ATR-scaled stops.
 
@@ -797,21 +811,29 @@ def _backtest_one_atr_managed(
             if cur_sig != 0.0 and equity_now > 0.0:
                 trade_entry_equity = cash
                 in_trade = True
-                trade_value = equity_now * fraction
+                # Compute fill first (needed for ATR-based risk sizing)
                 if cur_sig > 0.0:
                     fill = open_arr[i] * slip_buy
+                else:
+                    fill = open_arr[i] * slip_sell
+                atr_i = atr_arr[i]
+                has_atr = (not np.isnan(atr_i)) and atr_i > 0.0
+                if risk_per_trade > 0.0 and sl_mult > 0.0 and has_atr:
+                    stop_dist = sl_mult * atr_i
+                    trade_value = equity_now * risk_per_trade * fill / stop_dist
+                    trade_value = min(trade_value, equity_now * fraction)
+                else:
+                    trade_value = equity_now * fraction
+                if cur_sig > 0.0:
                     shares = trade_value / (fill * cost_mul)
                     cash -= trade_value
                 else:
-                    fill = open_arr[i] * slip_sell
                     qty = trade_value / fill
                     cash += trade_value * recv_mul
                     shares = -qty
                 entry_price = fill
                 peak_price = fill
                 # ATR-scaled stop levels — disabled (0) when ATR is NaN/non-positive
-                atr_i = atr_arr[i]
-                has_atr = (not np.isnan(atr_i)) and atr_i > 0.0
                 if cur_sig > 0.0:
                     sl_level = (
                         (entry_price - sl_mult * atr_i) if (sl_mult > 0.0 and has_atr) else 0.0
@@ -900,20 +922,28 @@ def _backtest_one_atr_managed(
             if equity_now > 0.0:
                 trade_entry_equity = cash
                 in_trade = True
-                trade_value = equity_now * fraction
+                # Compute fill first (needed for ATR-based risk sizing)
                 if cur_sig > 0.0:
                     fill = close[i] * slip_buy
+                else:
+                    fill = close[i] * slip_sell
+                atr_i = atr_arr[i]
+                has_atr = (not np.isnan(atr_i)) and atr_i > 0.0
+                if risk_per_trade > 0.0 and sl_mult > 0.0 and has_atr:
+                    stop_dist = sl_mult * atr_i
+                    trade_value = equity_now * risk_per_trade * fill / stop_dist
+                    trade_value = min(trade_value, equity_now * fraction)
+                else:
+                    trade_value = equity_now * fraction
+                if cur_sig > 0.0:
                     shares = trade_value / (fill * cost_mul)
                     cash -= trade_value
                 else:
-                    fill = close[i] * slip_sell
                     qty = trade_value / fill
                     cash += trade_value * recv_mul
                     shares = -qty
                 entry_price = fill
                 peak_price = fill
-                atr_i = atr_arr[i]
-                has_atr = (not np.isnan(atr_i)) and atr_i > 0.0
                 if cur_sig > 0.0:
                     sl_level = (
                         (entry_price - sl_mult * atr_i) if (sl_mult > 0.0 and has_atr) else 0.0
@@ -1022,6 +1052,7 @@ def backtest_batch_atr_managed(
     sl_mult_arr,
     tp_mult_arr,
     trail_mult_arr,
+    risk_per_trade,
 ):
     """Run ALL ATR-managed backtests in parallel across CPU cores.
 
@@ -1031,6 +1062,7 @@ def backtest_batch_atr_managed(
         sl_mult_arr: ATR stop-loss multipliers per combo (0 = disabled).
         tp_mult_arr: ATR take-profit multipliers per combo (0 = disabled).
         trail_mult_arr: ATR trailing-stop multipliers per combo (0 = disabled).
+        risk_per_trade: fraction of equity to risk per trade (0 = disabled).
 
     Returns:
         2D array (N_combos x 8) of metrics per combo.
@@ -1059,6 +1091,7 @@ def backtest_batch_atr_managed(
             sl_mult_arr[c],
             tp_mult_arr[c],
             trail_mult_arr[c],
+            risk_per_trade,
         )
         out[c, 0] = r0
         out[c, 1] = r1
@@ -1167,6 +1200,7 @@ def backtest_one_managed_equity(
     sl_pct,
     tp_pct,
     trail_pct,
+    risk_per_trade,
 ):
     """Same as _backtest_one_managed but also returns an equity curve array."""
     n = len(close)
@@ -1213,7 +1247,11 @@ def backtest_one_managed_equity(
 
             equity_now = cash
             if cur_sig != 0.0 and equity_now > 0.0:
-                trade_value = equity_now * fraction
+                if risk_per_trade > 0.0 and sl_pct > 0.0:
+                    trade_value = equity_now * risk_per_trade / sl_pct
+                    trade_value = min(trade_value, equity_now * fraction)
+                else:
+                    trade_value = equity_now * fraction
                 if cur_sig > 0.0:
                     # BUG-01 fix: fee embedded in share price
                     fill = open_arr[i] * slip_buy
@@ -1288,7 +1326,11 @@ def backtest_one_managed_equity(
         if stopped and cur_sig != 0.0 and shares == 0.0:
             equity_now = cash
             if equity_now > 0.0:
-                trade_value = equity_now * fraction
+                if risk_per_trade > 0.0 and sl_pct > 0.0:
+                    trade_value = equity_now * risk_per_trade / sl_pct
+                    trade_value = min(trade_value, equity_now * fraction)
+                else:
+                    trade_value = equity_now * fraction
                 if cur_sig > 0.0:
                     # BUG-01 fix: fee embedded in share price
                     fill = close[i] * slip_buy
@@ -1338,6 +1380,7 @@ def backtest_one_atr_managed_equity(
     sl_mult,
     tp_mult,
     trail_mult,
+    risk_per_trade,
 ):
     """Same as _backtest_one_atr_managed but returns an equity curve array."""
     n = len(close)
@@ -1383,20 +1426,28 @@ def backtest_one_atr_managed_equity(
 
             equity_now = cash
             if cur_sig != 0.0 and equity_now > 0.0:
-                trade_value = equity_now * fraction
+                # Compute fill first (needed for ATR-based risk sizing)
                 if cur_sig > 0.0:
                     fill = open_arr[i] * slip_buy
+                else:
+                    fill = open_arr[i] * slip_sell
+                atr_i = atr_arr[i]
+                has_atr = (not np.isnan(atr_i)) and atr_i > 0.0
+                if risk_per_trade > 0.0 and sl_mult > 0.0 and has_atr:
+                    stop_dist = sl_mult * atr_i
+                    trade_value = equity_now * risk_per_trade * fill / stop_dist
+                    trade_value = min(trade_value, equity_now * fraction)
+                else:
+                    trade_value = equity_now * fraction
+                if cur_sig > 0.0:
                     shares = trade_value / (fill * cost_mul)
                     cash -= trade_value
                 else:
-                    fill = open_arr[i] * slip_sell
                     qty = trade_value / fill
                     cash += trade_value * recv_mul
                     shares = -qty
                 entry_price = fill
                 peak_price = fill
-                atr_i = atr_arr[i]
-                has_atr = (not np.isnan(atr_i)) and atr_i > 0.0
                 if cur_sig > 0.0:
                     sl_level = (
                         (entry_price - sl_mult * atr_i) if (sl_mult > 0.0 and has_atr) else 0.0
@@ -1469,20 +1520,28 @@ def backtest_one_atr_managed_equity(
         if stopped and cur_sig != 0.0 and shares == 0.0:
             equity_now = cash
             if equity_now > 0.0:
-                trade_value = equity_now * fraction
+                # Compute fill first (needed for ATR-based risk sizing)
                 if cur_sig > 0.0:
                     fill = close[i] * slip_buy
+                else:
+                    fill = close[i] * slip_sell
+                atr_i = atr_arr[i]
+                has_atr = (not np.isnan(atr_i)) and atr_i > 0.0
+                if risk_per_trade > 0.0 and sl_mult > 0.0 and has_atr:
+                    stop_dist = sl_mult * atr_i
+                    trade_value = equity_now * risk_per_trade * fill / stop_dist
+                    trade_value = min(trade_value, equity_now * fraction)
+                else:
+                    trade_value = equity_now * fraction
+                if cur_sig > 0.0:
                     shares = trade_value / (fill * cost_mul)
                     cash -= trade_value
                 else:
-                    fill = close[i] * slip_sell
                     qty = trade_value / fill
                     cash += trade_value * recv_mul
                     shares = -qty
                 entry_price = fill
                 peak_price = fill
-                atr_i = atr_arr[i]
-                has_atr = (not np.isnan(atr_i)) and atr_i > 0.0
                 if cur_sig > 0.0:
                     sl_level = (
                         (entry_price - sl_mult * atr_i) if (sl_mult > 0.0 and has_atr) else 0.0
@@ -1545,6 +1604,7 @@ backtest_batch_managed(
     np.zeros(1, dtype=np.float64),
     np.zeros(1, dtype=np.float64),
     np.zeros(1, dtype=np.float64),
+    0.0,
 )
 _dummy_sig1d = np.zeros(3, dtype=np.float64)
 backtest_one_equity(
@@ -1576,6 +1636,7 @@ backtest_one_managed_equity(
     0.0,
     0.0,
     0.0,
+    0.0,
 )
 _dummy_atr3 = np.array([0.001, 0.001, 0.001], dtype=np.float64)
 backtest_batch_atr_managed(
@@ -1596,6 +1657,7 @@ backtest_batch_atr_managed(
     np.zeros(1, dtype=np.float64),
     np.zeros(1, dtype=np.float64),
     np.zeros(1, dtype=np.float64),
+    0.0,
 )
 backtest_one_atr_managed_equity(
     _dummy_close,
@@ -1613,6 +1675,7 @@ backtest_one_atr_managed_equity(
     _dummy_atr3,
     1.5,
     3.0,
+    0.0,
     0.0,
 )
 del (
