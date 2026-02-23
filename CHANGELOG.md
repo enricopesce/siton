@@ -10,9 +10,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ## [Unreleased]
 
 ### Added
-- Six progressive example strategies (`01_ema_crossover` → `05_multi_strategy_walkforward`)
+- Eight progressive example strategies (`01_ema_crossover` → `07_purged_kfold_cv`)
 - ATR-normalized stop-loss / take-profit / trailing stop (`backtest_batch_atr_managed`)
-- Walk-forward validation with expanding IS windows and PSR/DSR overfitting detection
+- Purged K-fold cross-validation (López de Prado, AFML): anchored expanding windows, configurable purge gap, per-fold WFE, parameter stability check
+- `cv_consistency` field on `Result`: fraction of CV folds with positive OOS Sharpe
+- `--cv` / `--cv-folds` / `--purge-bars` CLI flags for purged K-fold CV mode
+- `risk_per_trade` position sizing: ATR-based fractional-Kelly sizing
 - `Signal.majority()` — majority-vote composition across N signals
 - `signal.confirm(b, lookbacks)` — require confirming signal fired in last N bars
 - `signal.agree(b)` — directional agreement filter
@@ -21,7 +24,6 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `custom()` — escape hatch for fully user-defined signal functions
 - Sortino ratio and Calmar ratio in result output
 - Equity curve generation for top result
-- `--validate` / `--train-ratio` CLI flags for walk-forward mode
 - GitHub Actions CI workflow (lint + smoke tests on Python 3.10–3.12)
 - `CONTRIBUTING.md`, issue templates, PR template
 

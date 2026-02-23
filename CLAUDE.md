@@ -24,14 +24,14 @@ pip install -e .
 
 ```bash
 # CLI entry point (installed via pyproject.toml [project.scripts])
-siton examples/long_short_momentum.py --demo
-siton examples/long_short_momentum.py -s BTC/USDT -t 1h --start 2024-01-01
+siton examples/01_ema_crossover.py --demo
+siton examples/01_ema_crossover.py -s BTC/USDT -t 1h --start 2024-01-01
 
 # Or run strategy files directly
-python examples/long_short_momentum.py --demo
+python examples/01_ema_crossover.py --demo
 
 # Or as module
-python -m siton examples/long_short_momentum.py --demo
+python -m siton examples/01_ema_crossover.py --demo
 ```
 
 ## Architecture
